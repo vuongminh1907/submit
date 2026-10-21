@@ -1,0 +1,2 @@
+instance,runs,vertices,links,demands,mean_objective_mlu,std_objective_mlu,best_objective_mlu,mean_cpu_time_seconds,mean_gap,mean_bnb_nodes,status
+setA-01,10,20,80,40,0.929383899821109,0.0,0.929383899821109,6.814798674895428,0.0,1.0,OPTIMAL

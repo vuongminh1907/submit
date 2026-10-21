@@ -1,0 +1,19 @@
+.venv/
+.matplotlib/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+logs/
+Orange_project_submission.zip
+
+# Editor and local environment files
+.idea/
+.vscode/
+*.swp
+*.tmp
+
+# Julia/Python coverage and test caches
+.coverage
+.pytest_cache/
+coverage/
