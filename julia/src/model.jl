@@ -42,23 +42,35 @@ function _node_count(model)
     end
 end
 
-function _configure!(model, time_limit::Float64)
+function _configure!(model, time_limit::Float64, random_seed::Int)
     set_silent(model)
     set_time_limit_sec(model, max(time_limit, 0.01))
     set_optimizer_attribute(model, "threads", 1)
+    set_optimizer_attribute(model, "random_seed", random_seed)
     return model
 end
 
-function solve_instance(inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64)
-    estimated = ndemands(inst) * length(graphs) * inst.n * max(inst.n - 1, 1)
-    if estimated <= COMPACT_VARIABLE_LIMIT
-        return solve_compact(inst, graphs, time_limit)
-    end
-    return solve_by_columns(inst, graphs, time_limit)
+function _set_node_cap!(model, node_cap::Int)
+    no_node_cap = lowercase(strip(get(ENV, "NO_NODE_CAP", "0")))
+    no_node_cap in ("1", "true", "yes", "on") && return
+    set_optimizer_attribute(model, "mip_max_nodes", node_cap)
 end
 
-function solve_compact(inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64)
-    model = _configure!(Model(HiGHS.Optimizer), time_limit)
+function solve_instance(
+    inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64;
+    random_seed::Int=1,
+)
+    estimated = ndemands(inst) * length(graphs) * inst.n * max(inst.n - 1, 1)
+    if estimated <= COMPACT_VARIABLE_LIMIT
+        return solve_compact(inst, graphs, time_limit, random_seed)
+    end
+    return solve_by_columns(inst, graphs, time_limit, random_seed)
+end
+
+function solve_compact(
+    inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64, random_seed::Int=1,
+)
+    model = _configure!(Model(HiGHS.Optimizer), time_limit, random_seed)
     periods = length(graphs)
     demands = ndemands(inst)
     n = inst.n
@@ -317,10 +329,13 @@ function _path_load_cost(volume::Float64, ratios::Vector{Float64}, dual_load::Ve
 end
 
 """Solve one period, ignoring the inter-period budget."""
-function solve_period_columns(inst::Instance, g::PeriodGraph, time_index::Int, time_limit::Float64)
+function solve_period_columns(
+    inst::Instance, g::PeriodGraph, time_index::Int, time_limit::Float64,
+    random_seed::Int=1,
+)
     demands = ndemands(inst)
     m = length(inst.arcs)
-    model = _configure!(Model(HiGHS.Optimizer), time_limit)
+    model = _configure!(Model(HiGHS.Optimizer), time_limit, random_seed)
     @variable(model, L >= 0)
     @objective(model, Min, L)
     convexity = Vector{ConstraintRef}(undef, demands)
@@ -460,7 +475,7 @@ function solve_period_columns(inst::Instance, g::PeriodGraph, time_index::Int, t
     # Large pools make every branch-and-bound node expensive. The linear bound
     # is already certified, so the node cap only limits the incumbent search.
     node_cap = sum(length, columns) > 2_000 ? 20 : 400
-    set_optimizer_attribute(model, "mip_max_nodes", node_cap)
+    _set_node_cap!(model, node_cap)
     call = time()
     optimize!(model)
     optimize_time += time() - call
@@ -490,10 +505,12 @@ function solve_period_columns(inst::Instance, g::PeriodGraph, time_index::Int, t
     ), columns
 end
 
-function solve_by_columns(inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64)
+function solve_by_columns(
+    inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64, random_seed::Int=1,
+)
     started = time()
     if length(graphs) == 1
-        result, _ = solve_period_columns(inst, graphs[1], 0, time_limit)
+        result, _ = solve_period_columns(inst, graphs[1], 0, time_limit, random_seed)
         objective = validate_solution(inst, graphs, result.routes)
         bound = min(result.bound, objective)
         return SolveResult(
@@ -502,13 +519,13 @@ function solve_by_columns(inst::Instance, graphs::Vector{PeriodGraph}, time_limi
         )
     end
 
-    first, pool1 = solve_period_columns(inst, graphs[1], 0, 0.4 * time_limit)
-    second, pool2 = solve_period_columns(inst, graphs[2], 1, 0.4 * time_limit)
+    first, pool1 = solve_period_columns(inst, graphs[1], 0, 0.4 * time_limit, random_seed)
+    second, pool2 = solve_period_columns(inst, graphs[2], 1, 0.4 * time_limit, random_seed + 1)
     # Each certified single-period bound remains valid after the budget is added.
     lower = max(first.bound, second.bound, 0.0)
     joint = _joint_mip_explicit(
         inst, graphs, [_enrich_pool(inst, graphs[1], pool1), _enrich_pool(inst, graphs[2], pool2)],
-        time_limit - (time() - started), lower,
+        time_limit - (time() - started), lower, random_seed + 2,
     )
     routes = _best_joint_routes(inst, graphs, joint.routes, first.routes[1], second.routes[1])
     objective = validate_solution(inst, graphs, routes)
@@ -606,8 +623,8 @@ function _waypoint_sample(n::Int, source::Int, target::Int)
     return candidates[1:stride:end]
 end
 
-function _joint_mip_explicit(inst, graphs, pools, time_limit, known_bound)
-    model = _configure!(Model(HiGHS.Optimizer), max(time_limit, 0.01))
+function _joint_mip_explicit(inst, graphs, pools, time_limit, known_bound, random_seed::Int=1)
+    model = _configure!(Model(HiGHS.Optimizer), max(time_limit, 0.01), random_seed)
     demands = ndemands(inst)
     @variable(model, L >= 0)
     @objective(model, Min, L)
@@ -678,7 +695,7 @@ function _joint_mip_explicit(inst, graphs, pools, time_limit, known_bound)
         set_start_value(variable, p == 1 ? 1.0 : 0.0)
     end
     column_count = sum(length(pool) for pool in pools for paths in pool)
-    set_optimizer_attribute(model, "mip_max_nodes", column_count > 2_000 ? 20 : 400)
+    _set_node_cap!(model, column_count > 2_000 ? 20 : 400)
     started = time()
     optimize!(model)
     elapsed = time() - started
