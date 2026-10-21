@@ -55,7 +55,9 @@ function solution_json(inst::Instance, routes)
     return Dict("srpaths" => entries)
 end
 
-function run_instance(number::Int, periods::Int, time_limit::Float64, runs::Int)
+function run_instance(
+    number::Int, periods::Int, time_limit::Float64, runs::Int, base_seed::Int,
+)
     instance = load_instance(DATA, number)
     println("$(instance.name): building $periods period graph(s)")
     flush(stdout)
@@ -63,7 +65,8 @@ function run_instance(number::Int, periods::Int, time_limit::Float64, runs::Int)
     rows = String[]
     best = nothing
     for run in 1:runs
-        result = solve_instance(instance, graphs, time_limit)
+        seed = base_seed + run - 1
+        result = solve_instance(instance, graphs, time_limit; random_seed=seed)
         isfinite(result.objective) && validate_solution(instance, graphs, result.routes)
         if best === nothing || (isfinite(result.objective) && result.objective < best.objective)
             best = result
@@ -83,11 +86,12 @@ function run_instance(number::Int, periods::Int, time_limit::Float64, runs::Int)
             result.status,
             result.method,
             time_limit,
+            seed,
         ], ","))
         println(
             "$(instance.name) run $run/$runs: $(result.status), ",
             "MLU=$(result.objective), gap=$(result.gap), nodes=$(result.nodes), ",
-            "optimize=$(round(result.optimize_time; digits=2))s, method=$(result.method)",
+            "optimize=$(round(result.optimize_time; digits=2))s, method=$(result.method), seed=$seed",
         )
         flush(stdout)
     end
@@ -107,14 +111,15 @@ function main(args)
     numbers = Int[parse(Int, arg) for arg in args[2:end]]
     time_limit = parse(Float64, get(ENV, "TIME_LIMIT", periods == 1 ? "1800" : "3600"))
     runs = parse(Int, get(ENV, "RUNS", "10"))
+    base_seed = parse(Int, get(ENV, "SEED", "2026"))
     mkpath(RESULTS)
     mkpath(SOLUTIONS)
     label = periods == 1 ? "t0" : "full"
     for number in numbers
-        rows = run_instance(number, periods, time_limit, runs)
+        rows = run_instance(number, periods, time_limit, runs, base_seed)
         path = joinpath(RESULTS, "julia_$(label)_setA-$(lpad(string(number), 2, '0')).csv")
         open(path, "w") do io
-            println(io, "instance,run,periods,vertices,links,demands,objective,best_bound,gap,cpu_time_seconds,bnb_nodes,status,method,time_limit_seconds")
+            println(io, "instance,run,periods,vertices,links,demands,objective,best_bound,gap,cpu_time_seconds,bnb_nodes,status,method,time_limit_seconds,seed")
             foreach(row -> println(io, row), rows)
         end
     end
