@@ -42,6 +42,10 @@ function _node_count(model)
     end
 end
 
+function _env_flag(name::String)
+    return lowercase(strip(get(ENV, name, "0"))) in ("1", "true", "yes", "on")
+end
+
 function _configure!(model, time_limit::Float64, random_seed::Int)
     set_silent(model)
     set_time_limit_sec(model, max(time_limit, 0.01))
@@ -51,9 +55,16 @@ function _configure!(model, time_limit::Float64, random_seed::Int)
 end
 
 function _set_node_cap!(model, node_cap::Int)
-    no_node_cap = lowercase(strip(get(ENV, "NO_NODE_CAP", "0")))
-    no_node_cap in ("1", "true", "yes", "on") && return
+    (_env_flag("NO_NODE_CAP") || _env_flag("FULL_TIME")) && return
     set_optimizer_attribute(model, "mip_max_nodes", node_cap)
+end
+
+function _enable_full_time_mip!(model)
+    # No gap/node early stop; keep searching for the whole time limit.
+    set_optimizer_attribute(model, "mip_rel_gap", 0.0)
+    set_optimizer_attribute(model, "mip_abs_gap", 0.0)
+    set_optimizer_attribute(model, "presolve", "off")
+    set_optimizer_attribute(model, "mip_heuristic_effort", 1.0)
 end
 
 function solve_instance(
@@ -494,6 +505,119 @@ function solve_period_columns(
     catch
         NaN
     end
+
+    # FULL_TIME: only stop when the wall-clock budget is exhausted (or gap closed).
+    # HiGHS may prove the current pool optimal in milliseconds; we then spend the
+    # remaining time generating more columns and re-solving until time is gone.
+    if _env_flag("FULL_TIME") && isfinite(objective)
+        waypoint_state = ones(Int, demands)
+        full_round = 0
+        total_added = 0
+        _enable_full_time_mip!(model)
+        deadline = started + time_limit
+        while time() < deadline - 1.0
+            _gap(min(max(bound, 0.0), objective), objective) <= 1e-6 && break
+            remaining = deadline - time()
+            full_round += 1
+
+            # Spend part of the budget on column generation so we do not idle
+            # when the MIP proves the current pool optimal immediately.
+            gen_budget = min(max(remaining * 0.25, 5.0), remaining - 1.0, 60.0)
+            gen_deadline = time() + gen_budget
+            added = 0
+            gen_seed = random_seed + full_round
+            while time() < gen_deadline
+                batch = _diversify_columns!(
+                    inst, g, add_column!, variables, waypoint_state, gen_seed;
+                    as_binary=true, limit=500,
+                )
+                gen_seed += 1
+                if batch == 0
+                    batch = _diversify_two_waypoints!(
+                        inst, g, add_column!, variables, gen_seed;
+                        as_binary=true, limit=500,
+                    )
+                    gen_seed += 1
+                end
+                if batch == 0
+                    batch = _diversify_random_paths!(
+                        inst, g, add_column!, variables, gen_seed, time_index;
+                        as_binary=true, limit=200,
+                    )
+                    gen_seed += 1
+                end
+                added += batch
+                batch == 0 && break
+            end
+            total_added += added
+            remaining = deadline - time()
+            remaining <= 1.0 && break
+            println(
+                "full-time round=$full_round added=$added columns=$(sum(length, columns)) ",
+                "remaining=$(round(remaining; digits=1))s obj=$objective",
+            )
+            flush(stdout)
+
+            set_optimizer_attribute(model, "random_seed", random_seed + full_round)
+            _set_node_cap!(model, node_cap)
+            set_time_limit_sec(model, remaining)
+            set_start_value(L, objective)
+            chosen = Dict{Int,Int}()
+            for d in 1:demands
+                for (p, path) in enumerate(columns[d])
+                    if path == routes[d]
+                        chosen[d] = p
+                        break
+                    end
+                end
+            end
+            for d in 1:demands, (p, variable) in enumerate(variables[d])
+                set_start_value(variable, get(chosen, d, 1) == p ? 1.0 : 0.0)
+            end
+            call = time()
+            optimize!(model)
+            mip_elapsed = time() - call
+            optimize_time += mip_elapsed
+            nodes += _node_count(model)
+
+            if has_values(model)
+                candidate = Vector{Vector{Int}}(undef, demands)
+                for d in 1:demands
+                    values = [value(variable) for variable in variables[d]]
+                    candidate[d] = columns[d][argmax(values)]
+                end
+                candidate_obj = try
+                    maximum_load(inst, g, candidate, time_index)
+                catch
+                    NaN
+                end
+                if isfinite(candidate_obj) && candidate_obj < objective - 1e-12
+                    routes = candidate
+                    objective = candidate_obj
+                end
+            end
+
+            # MIP consumed (almost) the whole remaining budget → time is up.
+            if mip_elapsed >= remaining - 2.0
+                break
+            end
+            # Cannot grow the pool any further and MIP is instant → stop.
+            if added == 0 && mip_elapsed < 1.0
+                println(
+                    "full-time: pool exhausted after $full_round round(s); ",
+                    "$(round(max(deadline - time(), 0.0); digits=1))s unused",
+                )
+                flush(stdout)
+                break
+            end
+        end
+        println(
+            "full-time done rounds=$full_round added=$total_added obj=$objective ",
+            "wall=$(round(time() - started; digits=1))s",
+        )
+        flush(stdout)
+    end
+
     if !isfinite(objective)
         return SolveResult(NaN, bound, NaN, optimize_time, nodes, "Infeasible", [routes], "column-generation"), columns
     end
@@ -503,6 +627,96 @@ function solve_period_columns(
     return SolveResult(
         objective, bound, _gap(bound, objective), optimize_time, nodes, status, [routes], "column-generation",
     ), columns
+end
+
+function _diversify_columns!(
+    inst::Instance, g::PeriodGraph, add_column!, variables, waypoint_state::Vector{Int}, seed::Int;
+    as_binary::Bool=false, limit::Int=200,
+)
+    demands = ndemands(inst)
+    added = 0
+    rng = Random.MersenneTwister(seed)
+    order = randperm(rng, demands)
+    for d in order
+        added >= limit && break
+        source = inst.source[d]
+        target = inst.target[d]
+        candidates = [v for v in 1:inst.n if v != source && v != target]
+        isempty(candidates) && continue
+        start = waypoint_state[d]
+        for offset in 0:(length(candidates) - 1)
+            added >= limit && break
+            idx = mod1(start + offset, length(candidates))
+            waypoint = candidates[idx]
+            waypoint_state[d] = mod1(idx + 1, length(candidates))
+            reachable(g, source, waypoint) && reachable(g, waypoint, target) || continue
+            path = [source, waypoint, target]
+            length(path) - 1 <= inst.maxseg || continue
+            if add_column!(d, path)
+                as_binary && set_binary(variables[d][end])
+                added += 1
+            end
+        end
+    end
+    return added
+end
+
+function _diversify_two_waypoints!(
+    inst::Instance, g::PeriodGraph, add_column!, variables, seed::Int;
+    as_binary::Bool=false, limit::Int=200,
+)
+    inst.maxseg < 3 && return 0
+    demands = ndemands(inst)
+    added = 0
+    rng = Random.MersenneTwister(seed)
+    attempts = 0
+    max_attempts = limit * 20
+    while added < limit && attempts < max_attempts
+        attempts += 1
+        d = rand(rng, 1:demands)
+        source = inst.source[d]
+        target = inst.target[d]
+        candidates = [v for v in 1:inst.n if v != source && v != target]
+        length(candidates) < 2 && continue
+        w1 = candidates[rand(rng, 1:length(candidates))]
+        w2 = candidates[rand(rng, 1:length(candidates))]
+        w1 == w2 && continue
+        reachable(g, source, w1) && reachable(g, w1, w2) && reachable(g, w2, target) || continue
+        path = [source, w1, w2, target]
+        if add_column!(d, path)
+            as_binary && set_binary(variables[d][end])
+            added += 1
+        end
+    end
+    return added
+end
+
+function _diversify_random_paths!(
+    inst::Instance, g::PeriodGraph, add_column!, variables, seed::Int, time_index::Int;
+    as_binary::Bool=false, limit::Int=200,
+)
+    demands = ndemands(inst)
+    added = 0
+    rng = Random.MersenneTwister(seed)
+    n = inst.n
+    for _ in 1:limit
+        d = rand(rng, 1:demands)
+        volume = max(inst.volume[d, time_index + 1], 1e-9)
+        unit = fill(Inf, n, n)
+        @inbounds for i in 1:n, j in 1:n
+            i == j && continue
+            isempty(g.seg_arcs[i, j]) && continue
+            unit[i, j] = rand(rng)
+        end
+        extra = zeros(n, n)
+        path, _ = _best_path(unit, extra, inst.source[d], inst.target[d], inst.maxseg, volume)
+        isempty(path) && continue
+        if add_column!(d, path)
+            as_binary && set_binary(variables[d][end])
+            added += 1
+        end
+    end
+    return added
 end
 
 function solve_by_columns(
