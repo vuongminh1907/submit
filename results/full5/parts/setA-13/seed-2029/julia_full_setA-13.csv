@@ -1,2 +1,0 @@
-instance,run,periods,vertices,links,demands,objective,best_bound,gap,cpu_time_seconds,bnb_nodes,status,method,time_limit_seconds,seed
-setA-13,1,2,200,1000,2000,0.042735,0.0407925,0.045454545454545414,3593.668578147888,6063,Not Optimal,column-generation,3600.0,2029
