@@ -1,6 +1,7 @@
 using JSON3
 using JuMP
 using HiGHS
+using Random
 
 include(joinpath(@__DIR__, "src", "data.jl"))
 include(joinpath(@__DIR__, "src", "model.jl"))
