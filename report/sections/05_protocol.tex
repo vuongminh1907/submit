@@ -1,0 +1,12 @@
+\section{Experimental protocol}
+
+Set~A ranges from 20 vertices, 80 links and 40 demands to 400 vertices, 2000 links and
+6000 demands.
+Limits are 1800\,s for period~0 and 3600\,s for the two-period model.
+A run may return early when the MLU bound certifies the incumbent.
+In Tables~\ref{tab:t0} and~\ref{tab:full}, MLU, \texttt{optimize!} time, gap and branch-and-bound
+nodes are means over ten runs.
+Status is categorical: \emph{MLU-opt.} if all ten runs are certified for~\eqref{eq:mlu}, and
+\emph{Not cert.} otherwise (including mixed outcomes).
+An \texttt{optimize!} mean can slightly exceed the configured limit because a call is recorded
+only when it returns.

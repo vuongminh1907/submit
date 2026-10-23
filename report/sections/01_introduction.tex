@@ -1,0 +1,22 @@
+\section{Introduction}
+
+Orange routes origin--destination demands on a directed IP/MPLS backbone.
+Between routing changes, traffic follows shortest paths induced by administrative metrics,
+and equal-cost paths share the flow.
+Segment Routing~\citep{rfc8402} inserts a short list of waypoints; between successive
+waypoints the network still uses shortest-path forwarding, so a compact header can move
+traffic away from a congested link.
+
+The EURO/ROADEF 2026 challenge~\citep{orange2026} defines $T$-Adaptive Segment Routing
+($T$-ASR) over a general horizon $T=\{0,\ldots,h-1\}$.
+In the course experiments we take $h=2$: period~0 is the nominal topology, and period~1
+withdraws some links for maintenance while the traffic matrix changes.
+A budget limits how many segments may change between the two periods.
+
+The challenge objective~\citep{orange2026} sorts every arc-period load and minimizes that
+vector lexicographically.
+This report solves only the primary scalar stage of that order: the maximum link utilization.
+Section~\ref{sec:obj} states the scientific rationale for that choice.
+We solve all twenty Set~A instances on period~0 with a limit of 1800\,s, then on both periods
+with the budget and a limit of 3600\,s.
+Every table entry is a mean over ten runs with seeds 2026--2035.

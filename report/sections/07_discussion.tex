@@ -1,0 +1,17 @@
+\section{Discussion and limitations}
+
+The weakest two-period results are setA-16 and setA-19, with mean gaps $0.67$ and $0.56$
+after one hour.
+The best feasible value among the ten runs is better than the reported mean: $0.1025$ for
+setA-16 and $0.0796$ for setA-19.
+A missing MLU certificate stays ``Not cert.'', and a bound that was not computed is never
+written as zero.
+
+Two modelling choices delimit the scope of the tables.
+First, the formulation optimizes~\eqref{eq:mlu}, not the full lexicographic vector of
+loads~\citep{orange2026}; two routings with the same peak may still differ on the remaining
+sorted loads.
+Second, the split coefficients follow the course note~\citep{courser2026} rather than a
+router-local ECMP recursion.
+Within those choices, every row comes from the MIP above, either compact or as a path
+formulation with a computed lower bound on~$L$.
