@@ -1,23 +1,28 @@
-\documentclass[11pt,a4paper]{article}
+\documentclass[11pt,a4paper,oneside]{article}
 
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
-\usepackage{lmodern}
-\usepackage[hmargin=1.7cm,top=1.55cm,bottom=1.55cm,headheight=15pt]{geometry}
+\usepackage[english]{babel}
+\usepackage{times}
+\usepackage[top=1.6cm,bottom=1.6cm,left=1.9cm,right=1.9cm,headheight=15pt]{geometry}
 \usepackage{microtype}
 \usepackage{setspace}
-\usepackage{amsmath,amssymb}
+\usepackage{indentfirst}
+\usepackage{amsmath,amssymb,amsthm,amsbsy}
 \usepackage{graphicx}
-\usepackage{xcolor}
-\usepackage{tabularray}
-\UseTblrLibrary{booktabs}
-\usepackage{titlesec}
-\usepackage{caption}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{booktabs}
+\usepackage[table]{xcolor}
+\usepackage{colortbl}
+\usepackage[font=small,labelfont=bf]{caption}
 \usepackage{float}
 \usepackage{fancyhdr}
 \usepackage{enumitem}
+\usepackage{titlesec}
 \usepackage[numbers,sort&compress]{natbib}
 \usepackage[hidelinks]{hyperref}
+\usepackage[all]{hypcap}
 
 \definecolor{ink}{HTML}{1B3A4B}
 \definecolor{line}{HTML}{C5D0D6}
@@ -27,28 +32,23 @@
 \definecolor{nopt}{HTML}{B45309}
 \definecolor{muted}{HTML}{5E6A71}
 
-\setstretch{1.05}
+\onehalfspacing
 \setlength{\parindent}{1.05em}
-\setlength{\parskip}{0.18em}
+\setlength{\parskip}{0.2em}
 \setlist[itemize]{leftmargin=1.15em,itemsep=0.12em,topsep=0.2em}
 
 \titleformat{\section}
   {\large\bfseries\color{ink}}
   {\thesection}{0.55em}{}
   [\vspace{0.08em}{\color{line}\titlerule[0.55pt]}]
-\titlespacing*{\section}{0pt}{0.9em}{0.35em}
+\titlespacing*{\section}{0pt}{0.85em}{0.35em}
 
 \titleformat{\subsection}
   {\normalsize\bfseries\color{ink}}
   {\thesubsection}{0.45em}{}
-\titlespacing*{\subsection}{0pt}{0.55em}{0.2em}
+\titlespacing*{\subsection}{0pt}{0.5em}{0.2em}
 
-\captionsetup{
-  font={small,color=ink},
-  labelfont={bf},
-  skip=4pt,
-  justification=centering
-}
+\captionsetup{skip=4pt,justification=centering}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -63,6 +63,18 @@
 
 \newcommand{\OK}{\textcolor{opt}{MLU-opt.}}
 \newcommand{\NO}{\textcolor{nopt}{Not cert.}}
+\newcommand{\tblhead}{%
+  \rowcolor{headbg}%
+  \textcolor{white}{\textbf{Instance}} &
+  \textcolor{white}{\textbf{$|V|$}} &
+  \textcolor{white}{\textbf{$|A|$}} &
+  \textcolor{white}{\textbf{$|D|$}} &
+  \textcolor{white}{\textbf{MLU}} &
+  \textcolor{white}{\textbf{Time (s)}} &
+  \textcolor{white}{\textbf{Gap}} &
+  \textcolor{white}{\textbf{Nodes}} &
+  \textcolor{white}{\textbf{Status}} \\
+}
 
 \begin{document}
 
@@ -263,18 +275,13 @@ only when it returns.
 \centering
 \caption{Period 0. Limit 1800\,s. Means over ten runs. Status refers to scalar MLU~\eqref{eq:mlu}.}
 \label{tab:t0}
-\small
-\begin{tblr}{
-  colspec = {l r r r r r r r l},
-  column{1} = {leftsep=5pt},
-  column{9} = {rightsep=5pt,leftsep=6pt},
-  colsep = 4.2pt,
-  rowsep = 1.45pt,
-  row{even} = {bg=rowbg},
-  row{1} = {bg=headbg, fg=white, font=\bfseries},
-  cells = {font=\small},
-}
-Instance & $|V|$ & $|A|$ & $|D|$ & MLU & Time (s) & Gap & Nodes & Status \\
+\footnotesize
+\setlength{\tabcolsep}{4.2pt}
+\rowcolors{2}{rowbg}{white}
+\begin{tabular}{@{}lrrrrrrrl@{}}
+\toprule
+\tblhead
+\midrule
 setA-01 & 20 & 80 & 40 & 0.9294 & 1.05 & 0 & 1 & \OK \\
 setA-02 & 30 & 150 & 45 & 0.5486 & 2.79 & 0 & 1 & \OK \\
 setA-03 & 50 & 250 & 20 & 0.9435 & 39.43 & 0 & 1 & \OK \\
@@ -295,7 +302,8 @@ setA-17 & 300 & 1270 & 2000 & 0.4242 & 0.05 & 0 & 0 & \OK \\
 setA-18 & 300 & 1500 & 2000 & 0.6334 & 0.04 & 0 & 0 & \OK \\
 setA-19 & 300 & 1998 & 6000 & 0.0483 & 1774.2 & 0.0296 & 8516.1 & \NO \\
 setA-20 & 400 & 2000 & 6000 & 0.9913 & 0.09 & 0 & 0 & \OK \\
-\end{tblr}
+\bottomrule
+\end{tabular}
 \end{table}
 
 On period~0, twelve of the twenty instances are MLU-optimal.
@@ -309,18 +317,13 @@ setA-04, setA-13 and setA-14 stop with a gap below $10^{-3}$; setA-10--12 remain
 \centering
 \caption{Periods 0 and 1 with budget. Limit 3600\,s. Status refers to scalar MLU~\eqref{eq:mlu}.}
 \label{tab:full}
-\small
-\begin{tblr}{
-  colspec = {l r r r r r r r l},
-  column{1} = {leftsep=5pt},
-  column{9} = {rightsep=5pt,leftsep=6pt},
-  colsep = 4.2pt,
-  rowsep = 1.45pt,
-  row{even} = {bg=rowbg},
-  row{1} = {bg=headbg, fg=white, font=\bfseries},
-  cells = {font=\small},
-}
-Instance & $|V|$ & $|A|$ & $|D|$ & MLU & Time (s) & Gap & Nodes & Status \\
+\footnotesize
+\setlength{\tabcolsep}{4.2pt}
+\rowcolors{2}{rowbg}{white}
+\begin{tabular}{@{}lrrrrrrrl@{}}
+\toprule
+\tblhead
+\midrule
 setA-01 & 20 & 80 & 40 & 0.9294 & 14.61 & 0 & 1 & \OK \\
 setA-02 & 30 & 150 & 45 & 0.9031 & 152.7 & 0 & 1 & \OK \\
 setA-03\textsuperscript{a} & 50 & 250 & 20 & 0.9437 & 1430.5 & 0.0030 & 33.1 & \NO\textsuperscript{a} \\
@@ -341,7 +344,8 @@ setA-17 & 300 & 1270 & 2000 & 0.4242 & 50.51 & 0 & 1 & \OK \\
 setA-18 & 300 & 1500 & 2000 & 1.0000 & 32.79 & 0 & 0 & \OK \\
 setA-19 & 300 & 1998 & 6000 & 0.1096 & 3542.7 & 0.5586 & 15254 & \NO \\
 setA-20 & 400 & 2000 & 6000 & 0.9913 & 401.9 & 0 & 2 & \OK \\
-\end{tblr}\\[0.3em]
+\bottomrule
+\end{tabular}\\[0.3em]
 {\footnotesize\color{muted}\textsuperscript{a}\,Eight runs are MLU-optimal at $0.9435$; two stop at $0.9444$.}
 \end{table}
 
