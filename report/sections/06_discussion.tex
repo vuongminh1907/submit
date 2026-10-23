@@ -1,0 +1,49 @@
+\section{Discussion and limitations}
+\label{sec:discussion}
+
+The experiments show that model size is not a reliable predictor of the reported solver time. Some of
+the largest instances require very little time inside \texttt{optimize!}, whereas several smaller
+instances use most of the limit. The important factor is whether the relaxation produces a lower bound
+that is close to a good integer routing. When the two values meet, optimality can be certified without
+exploring a large branch-and-bound tree. When they remain far apart, a long search may still leave a
+nonzero gap.
+
+The reconfiguration budget makes this issue more visible in the two-period experiment. Although the
+implementation combines valid single-period lower bounds with a joint relaxation bound, the resulting
+lower bound can still be weak for difficult instances. This is especially relevant for setA-16 and
+setA-19, whose mean gaps after one hour are 66.82\% and 55.86\%. Their best feasible MLU values over
+the ten runs are 0.1025 and 0.0796, respectively, both noticeably lower than their reported means. The
+variation between seeds suggests that additional path generation can still improve the incumbent,
+while the large gaps indicate that the current bounds are insufficient to assess how close those
+incumbents are to the true optimum.
+
+The averages also hide differences between individual runs. SetA-03 is a clear example: eight runs
+prove the same two-period optimum, but two runs reach the time limit with a slightly worse solution.
+For this reason, the table marks the instance as not certified rather than treating its small mean gap
+as proof of optimality. Similarly, a zero branch-and-bound node count does not mean that no
+optimization was performed; the relaxation and column-generation stages may already have closed the
+gap at the root. Node counts should also be compared with care because they are summed over solver
+calls and come from two different formulations.
+
+The timing results have a further limitation. They follow the course definition and measure only
+calls to \texttt{optimize!}; they are not end-to-end running times. This distinction matters most for
+column generation, where shortest-path preprocessing, pricing, and construction of new columns take
+place outside the solver calls. Since total wall-clock time was not stored in the result files, it
+cannot be reconstructed reliably afterwards. The present tables can therefore compare solver effort,
+but not the complete runtime of the two solution approaches.
+
+Three limitations define the scope of the conclusions. First, the model minimizes only the maximum
+link utilization in~\eqref{eq:mlu}. The full challenge objective is lexicographic: after minimizing the
+largest load, it also minimizes the second largest load, then the third largest, and so
+on~\citep{orange2026}. Two solutions with the same MLU may therefore have different values under the
+official objective. Second, the coefficients $r^t_{ija}$ follow the formula given in the course
+note~\citep{courser2026}. This formula assigns equal weight to complete shortest paths and may differ
+from router-local ECMP splitting on an asymmetric shortest-path graph. Third, the path-based integer
+model contains only the columns generated or added during the run. Its incumbents are feasible for the
+original model, and the reported lower bounds remain valid, but a non-certified row is not proof that
+the best possible routing has been found.
+
+Future improvements could focus on strengthening the joint relaxation, improving the pricing strategy,
+and incorporating branch-and-price so that new paths remain available throughout the integer search.
+After the scalar MLU is certified, the same framework could also be extended to optimize the remaining
+levels of the lexicographic objective.

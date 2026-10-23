@@ -2,46 +2,18 @@ using JSON3
 using JuMP
 using HiGHS
 using Random
+using Test
 
 include(joinpath(@__DIR__, "src", "data.jl"))
 include(joinpath(@__DIR__, "src", "model.jl"))
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
 const DATA = normpath(get(ENV, "DATA_DIR", joinpath(ROOT, "data", "setA")))
-const RESULTS = joinpath(ROOT, "results")
-const SOLUTIONS = joinpath(ROOT, "solutions")
+const RESULTS = normpath(get(ENV, "RESULTS_DIR", joinpath(ROOT, "results")))
+const SOLUTIONS = normpath(get(ENV, "SOLUTIONS_DIR", joinpath(ROOT, "solutions")))
 
 function selftest()
-    @assert route_distance([1, 2, 3], [1, 3]) == 3
-    @assert route_distance([1, 2, 3, 4], [1, 2, 4]) == 3
-    @assert route_distance([1, 2, 3, 4], [1, 3, 2, 4]) == 6
-    @assert route_distance([1, 2, 4], [1, 3, 4]) == 4
-
-    mktempdir() do directory
-        net = Dict(
-            "directed" => true,
-            "multigraph" => false,
-            "nodes" => [Dict("id" => i, "name" => "v$i") for i in 0:3],
-            "links" => [
-                Dict("id" => 0, "from" => 0, "to" => 1, "metric" => 1, "capacity" => 10),
-                Dict("id" => 1, "from" => 0, "to" => 2, "metric" => 1, "capacity" => 10),
-                Dict("id" => 2, "from" => 1, "to" => 3, "metric" => 1, "capacity" => 10),
-                Dict("id" => 3, "from" => 2, "to" => 3, "metric" => 1, "capacity" => 10),
-            ],
-        )
-        tm = Dict("num_time_slots" => 1, "demands" => [Dict("s" => 0, "t" => 3, "v" => [10.0])])
-        scenario = Dict("max_segments" => 4, "budget" => [], "interventions" => [])
-        for (suffix, content) in ("net" => net, "tm" => tm, "scenario" => scenario)
-            open(joinpath(directory, "setA-01-$suffix.json"), "w") do io
-                JSON3.write(io, content)
-            end
-        end
-        instance = load_instance(directory, 1)
-        graph = build_period(instance, 0)
-        ratios = path_ratios(graph, [1, 4])
-        @assert all(isapprox.(ratios, [0.5, 0.5, 0.5, 0.5]; atol=1e-8))
-    end
-    println("Self tests passed.")
+    include(joinpath(@__DIR__, "test", "runtests.jl"))
 end
 
 function solution_json(inst::Instance, routes)
@@ -56,6 +28,12 @@ function solution_json(inst::Instance, routes)
     return Dict("srpaths" => entries)
 end
 
+function write_solution(path::AbstractString, inst::Instance, routes)
+    open(path, "w") do io
+        JSON3.pretty(io, solution_json(inst, routes))
+    end
+end
+
 function run_instance(
     number::Int, periods::Int, time_limit::Float64, runs::Int, base_seed::Int,
 )
@@ -65,10 +43,18 @@ function run_instance(
     graphs = PeriodGraph[build_period(instance, t) for t in 0:(periods - 1)]
     rows = String[]
     best = nothing
+    label = periods == 1 ? "t0" : "full"
     for run in 1:runs
         seed = base_seed + run - 1
         result = solve_instance(instance, graphs, time_limit; random_seed=seed)
-        isfinite(result.objective) && validate_solution(instance, graphs, result.routes)
+        if isfinite(result.objective)
+            checked = validate_solution(instance, graphs, result.routes)
+            abs(checked - result.objective) <= 1e-9 * max(1.0, checked) ||
+                error("Reported MLU differs from the independently checked MLU.")
+            write_solution(
+                joinpath(SOLUTIONS, "$(instance.name)-julia-$label-seed$seed-srpaths.json"), instance, result.routes,
+            )
+        end
         if best === nothing || (isfinite(result.objective) && result.objective < best.objective)
             best = result
         end
@@ -97,10 +83,7 @@ function run_instance(
         flush(stdout)
     end
     if best !== nothing && isfinite(best.objective)
-        label = periods == 1 ? "t0" : "full"
-        open(joinpath(SOLUTIONS, "$(instance.name)-julia-$label-srpaths.json"), "w") do io
-            JSON3.pretty(io, solution_json(instance, best.routes))
-        end
+        write_solution(joinpath(SOLUTIONS, "$(instance.name)-julia-$label-srpaths.json"), instance, best.routes)
     end
     return rows
 end

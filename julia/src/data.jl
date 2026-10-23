@@ -1,6 +1,3 @@
-# Data, shortest-path counts, and split coefficients r(i,j,a,t).
-# The coefficient formula is the one required by project/calculating_r.pdf.
-
 struct Arc
     link_id::Int
     u::Int
@@ -16,9 +13,9 @@ struct Instance
     arcs::Vector{Arc}
     source::Vector{Int}
     target::Vector{Int}
-    volume::Matrix{Float64}   # demand × time slot, columns are t = 0,1,...
+    volume::Matrix{Float64}
     maxseg::Int
-    budget::Dict{Int,Int}     # JSON time index => allowed changes
+    budget::Dict{Int,Int}
     interventions::Dict{Int,Set{Int}}
 end
 
@@ -159,7 +156,7 @@ function load_instance(directory::AbstractString, number::Integer)
 end
 
 function build_period(inst::Instance, time_index::Int)
-    down = time_index == 0 ? Set{Int}() : get(inst.interventions, time_index, Set{Int}())
+    down = get(inst.interventions, time_index, Set{Int}())
     available = BitVector(arc.link_id ∉ down for arc in inst.arcs)
     n = inst.n
     m = length(inst.arcs)
@@ -232,6 +229,16 @@ segment_set(nodes::Vector{Int}) = Set((nodes[k], nodes[k + 1]) for k in 1:(lengt
 
 route_distance(a::Vector{Int}, b::Vector{Int}) = length(symdiff(segment_set(a), segment_set(b)))
 
+function route_ok(inst::Instance, g::PeriodGraph, route::Vector{Int}, d::Int)
+    route[1] == inst.source[d] && route[end] == inst.target[d] || return false
+    length(route) - 1 <= inst.maxseg || return false
+    length(unique(route)) == length(route) || return false
+    return all(reachable(g, route[k], route[k + 1]) for k in 1:(length(route) - 1))
+end
+
+reconfiguration_cost(first::Vector{Vector{Int}}, second::Vector{Vector{Int}}) =
+    sum(route_distance(first[d], second[d]) for d in eachindex(first))
+
 function maximum_load(inst::Instance, g::PeriodGraph, routes::Vector{Vector{Int}}, time_index::Int)
     flow = zeros(length(inst.arcs))
     column = time_index + 1
@@ -279,9 +286,7 @@ function validate_solution(
         end
     end
     if length(routes) > 1
-        used = sum(
-            route_distance(routes[1][d], routes[2][d]) for d in 1:ndemands(inst)
-        )
+        used = reconfiguration_cost(routes[1], routes[2])
         used <= inst.budget[1] || error("Budget violated: $used > $(inst.budget[1]).")
     end
     return maximum(

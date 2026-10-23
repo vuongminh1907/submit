@@ -1,22 +1,60 @@
 \section{Introduction}
 
-Orange routes origin--destination demands on a directed IP/MPLS backbone.
-Between routing changes, traffic follows shortest paths induced by administrative metrics,
-and equal-cost paths share the flow.
-Segment Routing~\citep{rfc8402} inserts a short list of waypoints; between successive
-waypoints the network still uses shortest-path forwarding, so a compact header can move
-traffic away from a congested link.
+\paragraph{Context.}
+Orange operates large national and international IP/MPLS backbones containing thousands of routers
+and links and carrying many thousands of origin--destination traffic demands. The continued growth
+of traffic, the diversity of services, and the development of Software-Defined Networking and Network
+Virtualization make the efficient use of this infrastructure increasingly important~\citep{orange2026}.
+Traffic Engineering (TE) addresses this operational problem by selecting routing parameters and paths
+so that the available capacity is used efficiently while an acceptable Quality of Service (QoS) is
+maintained. In particular, routing should avoid local congestion: an overloaded link can degrade every
+service whose traffic crosses it even when unused capacity remains elsewhere in the network.
 
-The EURO/ROADEF 2026 challenge~\citep{orange2026} defines $T$-Adaptive Segment Routing
-($T$-ASR) over a general horizon $T=\{0,\ldots,h-1\}$.
-In the course experiments we take $h=2$: period~0 is the nominal topology, and period~1
-withdraws some links for maintenance while the traffic matrix changes.
-A budget limits how many segments may change between the two periods.
+\paragraph{Motivation.}
+Capacity efficiency alone is not sufficient. Operator networks must also remain available when
+equipment is taken out of service, whether because of an unforeseen failure or a planned maintenance
+intervention. The subject recalls the standard requirement that a network remain functional after any
+single link or node failure, while current security and climate-related risks further motivate
+resilience to wider disruptions~\citep{orange2026}. Traffic volumes and equipment availability also
+vary with time. A routing plan should therefore anticipate forecast traffic matrices and scheduled
+interventions rather than optimize only one static nominal state. At the same time, excessive
+reconfiguration is undesirable: adding or removing waypoints may require operational actions, can
+incur a cost, and can temporarily affect QoS. The problem must consequently balance congestion
+reduction, resilience, and routing stability.
 
-The challenge objective~\citep{orange2026} sorts every arc-period load and minimizes that
-vector lexicographically.
-This report solves only the primary scalar stage of that order: the maximum link utilization.
-Section~\ref{sec:obj} states the scientific rationale for that choice.
-We solve all twenty Set~A instances on period~0 with a limit of 1800\,s, then on both periods
-with the budget and a limit of 3600\,s.
-Every table entry is a mean over ten runs with seeds 2026--2035.
+Traditional IP routing forwards packets along shortest paths induced by administrative link weights.
+This mechanism is simple and scalable, but the set of weights may not provide enough flexibility to
+distribute traffic well under several traffic and availability scenarios. Segment Routing
+(SR)~\citep{rfc8402} introduces a limited sequence of node segments, or waypoints, into the packet
+header. Between two consecutive waypoints, forwarding still follows the existing shortest-path
+mechanism. SR can therefore steer a demand through a non-shortest end-to-end route without requiring
+a separate forwarding state for every demand at every router, providing additional TE flexibility
+with limited implementation overhead.
+
+\paragraph{Problem description.}
+The EURO/ROADEF 2026 challenge defines the $T$-Adaptive Segment Routing problem
+($T$-ASR)~\citep{orange2026}. Its input is a capacitated directed network with administrative
+weights, a set of demands and time-dependent traffic volumes, a planning horizon
+$T=\{0,\ldots,h-1\}$, scheduled link interventions, a reconfiguration budget, and a maximum number of
+segments. For every demand and every time period, the decision is a segment path from the demand
+source to its destination. The selected paths must satisfy flow conservation and the segment limit;
+the induced traffic must respect the available period graph; and consecutive routing schemes must
+remain within the reconfiguration budget. The resulting link load is the carried flow divided by link
+capacity and may exceed one when the network is congested.
+
+The full challenge objective sorts all link loads across all periods in non-increasing order and
+minimizes this vector lexicographically: first the largest load, then the second largest, and so
+forth~\citep{orange2026}. The implementation studied here solves the scalar primary stage, the
+minimization of maximum link utilization (MLU). This is the first component of the lexicographic
+objective and a standard TE criterion; its scientific rationale and precise scope are detailed in
+Section~\ref{sec:objective}.
+
+\paragraph{Scope of this report.}
+Following the course instructions, the model is first evaluated on period~0 alone, which is the
+nominal network without the reconfiguration-budget constraint. It is then extended to two periods:
+period~1 applies the scheduled link withdrawals, uses its own traffic volumes, and activates the
+budget constraint between the two routing schemes. All twenty Set~A instances are tested with a time
+limit of 1800\,s for period~0 and 3600\,s for the two-period model. Each reported result is an average
+over ten runs with seeds 2026--2035. The remainder of the report presents the data construction,
+mathematical formulation, solution method, experimental protocol, numerical results, and limitations
+of the scalar MLU study.

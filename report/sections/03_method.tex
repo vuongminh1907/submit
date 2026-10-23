@@ -1,0 +1,104 @@
+\section{Solution method}
+\label{sec:method}
+
+\subsection{Formulation selection}
+
+The direct implementation of Section~\ref{sec:model} is a mixed-integer program with one binary segment
+variable for every demand, period, and reachable ordered pair of routers. This compact representation
+is exact for the scalar MLU model and exposes flow conservation, segment limits, link loads, and, in
+the two-period case, reconfiguration decisions directly to the solver. Its principal limitation is the
+$O(|D||T||V|^2)$ number of routing variables. The implementation therefore estimates this number as
+$|D||T||V|(|V|-1)$ and uses the compact formulation when the estimate is at most $100\,000$; larger
+instances are solved by the path-based method described below.
+
+\subsection{Single-period column generation}
+
+For a period~$t$, let $\mathcal{P}_{dt}$ be the set of admissible segment paths for demand~$d$, and
+let $R_{pat}$ denote the fraction of path~$p$ carried by physical link~$a$. A master variable
+$z_{dtp}$ selects one complete path, so flow conservation and the segment limit are enforced by the
+definition of a column. For a restricted subset $\widehat{\mathcal{P}}_{dt}\subseteq\mathcal{P}_{dt}$,
+the LP master is
+\begin{align}
+\min\ & L, \nonumber\\
+\text{s.t.}\ & \sum_{p\in\widehat{\mathcal{P}}_{dt}} z_{dtp}=1, && \forall d, \label{eq:convexity}\\
+& \sum_{d\in D}\sum_{p\in\widehat{\mathcal{P}}_{dt}} v_{dt}\,R_{pat}\,z_{dtp}\le c_a L, && \forall a\in A_t, \label{eq:master-load}\\
+& z_{dtp}\ge 0. \nonumber
+\end{align}
+The initial pool contains the direct source--destination segment for every demand. After solving the
+restricted master, pricing uses the dual values of \eqref{eq:convexity}--\eqref{eq:master-load} to
+find a minimum-reduced-cost path with at most $M$ segments. This bounded shortest-path problem is
+solved exactly by dynamic programming on $M$ layers of the complete segment graph.
+
+Let $\bar c^*_{dt}$ be the minimum reduced cost returned for demand~$d$. At every pricing round,
+\[
+\mathrm{LB}_t=z_{\mathrm{RMP}}+\sum_{d\in D}\min\{0,\bar c^*_{dt}\}
+\]
+is a valid Lagrangian lower bound for the complete path master. The dynamic program minimizes over
+bounded walks, a superset of simple paths; therefore its value remains a valid lower estimate even if
+a minimum walk repeats a router. Cycles are removed before a feasible column is inserted. If no
+negative-reduced-cost path exists, the restricted LP value itself is the optimum of the complete LP
+relaxation. The generated variables are then made binary and the restricted integer master is solved
+to obtain a feasible routing and an upper bound.
+
+\subsection{Joint two-period solution}
+
+For the full experiment, column generation is first applied separately to periods~0 and~1. Each solve
+receives 40\% of the total time limit and returns an initial path pool, an incumbent routing, and a
+valid single-period lower bound. Because the budget constraint only restricts the joint feasible set,
+$\max\{\mathrm{LB}_0,\mathrm{LB}_1\}$ is a valid initial lower bound for the full problem. The two
+pools are then enriched with a small number of feasible waypoint paths and with routes that are valid
+in both period graphs.
+
+The pools are coupled in a joint master containing one path-selection constraint per demand and
+period, the link-load constraints of both periods, and the absolute-change
+linearization~\eqref{eq:change}--\eqref{eq:budget}. An initial binary joint master, warm-started from
+a repaired budget-feasible pair of routings, provides a joint incumbent. The corresponding LP
+relaxation is then used for joint pricing. The reduced cost of a path includes the dual contribution
+of its period's link-load constraints, its demand-selection constraint, and the two absolute-change
+rows associated with every segment already represented in the joint master. For a previously unseen
+segment, assigning equal dual values to its two new change rows gives zero net reconfiguration
+penalty; this is a dual-feasible completion and hence preserves the validity of the lower bound.
+
+Pricing is performed for every demand in both periods by the same bounded dynamic program. If
+$\bar c^*_{dt}$ is the resulting minimum reduced cost, the joint bound is
+\[
+\mathrm{LB}_{\mathrm{joint}}=z^{\mathrm{LP}}_{\mathrm{joint}}+\sum_{t\in\{0,1\}}\sum_{d\in D}\min\{0,\bar c^*_{dt}\}.
+\]
+Negative-reduced-cost paths are added and the joint LP is re-solved. The implementation certifies the
+complete joint LP when the correction term is zero. Practical safeguards limit joint pricing to 40
+rounds and $25\,000$ columns and stop it after six rounds without LP improvement; if a safeguard is
+reached first, the corrected Lagrangian value remains a valid, possibly weaker, bound. The reported
+global lower bound is
+\[
+\mathrm{LB}=\max\{\mathrm{LB}_0,\mathrm{LB}_1,\mathrm{LB}_{\mathrm{joint}}\}.
+\]
+Finally, the enlarged budget-coupled master is solved with binary path variables.
+
+\subsection{Use of the remaining time}
+
+Obtaining a valid relaxation bound does not imply that the best integer routing in the current column
+pool attains that bound. When a positive gap and usable time remain, the implementation therefore
+generates additional feasible columns using systematic one-waypoint paths, randomized two-waypoint
+paths, and bounded paths obtained from randomized segment costs. It warm-starts the enlarged binary
+master from the best validated routing and solves it again with a different random seed. For the
+period-0 experiment, this diversification is applied to the single-period master. For the full
+experiment, the independent period-level diversification is disabled after the initial pools have been
+constructed; a candidate is instead added to every period pool in which it is feasible, and the
+budget-coupled joint MIP is re-solved. The process stops when the gap closes, the time limit is
+reached, or no new path is found and the integer solve terminates immediately. These heuristic rounds
+can improve only the feasible upper bound; they do not modify the previously established relaxation
+lower bound.
+
+\subsection{Bounds and certification}
+
+After optimization, every incumbent is checked independently for correct terminals, reachability,
+segment count, repeated vertices, reconfiguration cost, and recomputed link loads. The checked maximum
+load is the reported upper bound UB. The compact solver or the column-generation procedure supplies
+the lower bound LB, and the reported gap is
+\[
+\max\left\{0,\,1-\frac{\mathrm{LB}}{\mathrm{UB}}\right\}.
+\]
+A run is labelled \emph{MLU-optimal} when this relative gap is at most $10^{-6}$, the numerical
+tolerance adopted by the implementation. This certification concerns the scalar
+objective~\eqref{eq:mlu}; it does not certify the remaining ranks of the challenge's lexicographic
+objective.

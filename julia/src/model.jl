@@ -1,16 +1,3 @@
-# Exact T-ASR models.
-#
-# The compact model is the formulation required by the subject:
-#   (1) flow conservation, (2) segment limit, (3) load/MLU linking,
-#   (4) reconfiguration budget. Degree inequalities are valid cuts that
-#   make every selected support a single simple segment path.
-#
-# Large instances have O(|D||T||V|^2) binaries. For those instances the
-# same formulation is solved through its equivalent path representation:
-# column generation certifies the LP bound, then HiGHS branch-and-bound
-# optimizes the generated integer master. The reported gap is
-# 1 - (best valid lower bound) / (best feasible solution).
-
 struct SolveResult
     objective::Float64
     bound::Float64
@@ -22,16 +9,37 @@ struct SolveResult
     method::String
 end
 
+struct PeriodSolve
+    result::SolveResult
+    columns::Vector{Vector{Vector{Int}}}
+    routes::Vector{Vector{Int}}
+    lower::Float64
+end
+
 const COMPACT_VARIABLE_LIMIT = 100_000
+const CERTIFICATION_TOLERANCE = 1e-6
+const REDUCED_COST_TOLERANCE = 1e-7
+const PERIOD_PRICING_ROUNDS = 120
+const PERIOD_TIME_SHARE = 0.4
+const JOINT_WARMUP_SHARE = 0.1
+const JOINT_PRICING_SHARE = 0.5
+const JOINT_PRICING_ROUNDS = 40
+const JOINT_PRICING_COLUMNS = 25_000
+const JOINT_PRICING_STALL = 6
+const ENRICHED_POOL_SIZE = 6
+
+estimated_binaries(inst::Instance, periods::Int) = ndemands(inst) * periods * inst.n * max(inst.n - 1, 1)
 
 function _gap(bound::Float64, objective::Float64)
     objective <= 1e-12 && return 0.0
     return max(0.0, 1.0 - bound / objective)
 end
 
+certified(bound::Float64, objective::Float64) = _gap(bound, objective) <= CERTIFICATION_TOLERANCE
+
 function _status(bound::Float64, objective::Float64, feasible::Bool)
     feasible || return "Infeasible"
-    return _gap(bound, objective) <= 1e-6 ? "Optimal" : "Not Optimal"
+    return certified(bound, objective) ? "Optimal" : "Not Optimal"
 end
 
 function _node_count(model)
@@ -42,37 +50,35 @@ function _node_count(model)
     end
 end
 
-function _env_flag(name::String)
-    return lowercase(strip(get(ENV, name, "0"))) in ("1", "true", "yes", "on")
-end
-
 function _configure!(model, time_limit::Float64, random_seed::Int)
     set_silent(model)
     set_time_limit_sec(model, max(time_limit, 0.01))
     set_optimizer_attribute(model, "threads", 1)
     set_optimizer_attribute(model, "random_seed", random_seed)
+    set_optimizer_attribute(model, "mip_rel_gap", CERTIFICATION_TOLERANCE)
+    set_optimizer_attribute(model, "mip_abs_gap", 0.0)
     return model
 end
 
-function _set_node_cap!(model, node_cap::Int)
-    (_env_flag("NO_NODE_CAP") || _env_flag("FULL_TIME")) && return
-    set_optimizer_attribute(model, "mip_max_nodes", node_cap)
-end
-
-function _enable_full_time_mip!(model)
-    # No gap/node early stop; keep searching for the whole time limit.
+function _exhaustive_mip!(model)
     set_optimizer_attribute(model, "mip_rel_gap", 0.0)
     set_optimizer_attribute(model, "mip_abs_gap", 0.0)
     set_optimizer_attribute(model, "presolve", "off")
     set_optimizer_attribute(model, "mip_heuristic_effort", 1.0)
+    return model
+end
+
+function _timed_optimize!(model)
+    started = time()
+    optimize!(model)
+    return time() - started
 end
 
 function solve_instance(
     inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64;
     random_seed::Int=1,
 )
-    estimated = ndemands(inst) * length(graphs) * inst.n * max(inst.n - 1, 1)
-    if estimated <= COMPACT_VARIABLE_LIMIT
+    if estimated_binaries(inst, length(graphs)) <= COMPACT_VARIABLE_LIMIT
         return solve_compact(inst, graphs, time_limit, random_seed)
     end
     return solve_by_columns(inst, graphs, time_limit, random_seed)
@@ -115,24 +121,17 @@ function solve_compact(
             source = inst.source[d]
             target = inst.target[d]
             for node in 1:n
-                flow = AffExpr(0.0)
-                for p in outgoing[node]
-                    add_to_expression!(flow, x[t, d, p], 1.0)
-                end
-                for p in incoming[node]
-                    add_to_expression!(flow, x[t, d, p], -1.0)
-                end
-                rhs = node == source ? 1.0 : node == target ? -1.0 : 0.0
-                @constraint(model, flow == rhs)
                 out_expr = AffExpr(0.0)
                 for p in outgoing[node]
                     add_to_expression!(out_expr, x[t, d, p], 1.0)
                 end
-                @constraint(model, out_expr <= (node == target ? 0.0 : 1.0))
                 in_expr = AffExpr(0.0)
                 for p in incoming[node]
                     add_to_expression!(in_expr, x[t, d, p], 1.0)
                 end
+                rhs = node == source ? 1.0 : node == target ? -1.0 : 0.0
+                @constraint(model, out_expr - in_expr == rhs)
+                @constraint(model, out_expr <= (node == target ? 0.0 : 1.0))
                 @constraint(model, in_expr <= (node == source ? 0.0 : 1.0))
             end
             @constraint(model, sum(x[t, d, p] for p in 1:length(pairs[t])) <= inst.maxseg)
@@ -170,16 +169,13 @@ function solve_compact(
         @constraint(model, sum(y) <= inst.budget[1])
     end
 
-    started = time()
-    optimize!(model)
-    elapsed = time() - started
-    return _result_from_compact(inst, graphs, model, pairs, x, L, elapsed)
+    elapsed = _timed_optimize!(model)
+    return _result_from_compact(inst, graphs, model, pairs, x, elapsed)
 end
 
-function _result_from_compact(inst, graphs, model, pairs, x, L, elapsed)
+function _result_from_compact(inst, graphs, model, pairs, x, elapsed)
     nodes = _node_count(model)
-    termination = termination_status(model)
-    if termination == MOI.INFEASIBLE || !has_values(model)
+    if termination_status(model) == MOI.INFEASIBLE || !has_values(model)
         return SolveResult(NaN, NaN, NaN, elapsed, nodes, "Infeasible", Vector{Vector{Int}}[], "compact-mip")
     end
     routes = Vector{Vector{Vector{Int}}}()
@@ -203,12 +199,11 @@ function _result_from_compact(inst, graphs, model, pairs, x, L, elapsed)
     end
     objective = validate_solution(inst, graphs, routes)
     bound = try
-        Float64(objective_bound(model))
+        min(Float64(objective_bound(model)), objective)
     catch
         0.0
     end
-    bound = min(bound, objective)
-    status = termination == MOI.OPTIMAL ? "Optimal" : _status(bound, objective, true)
+    status = _status(bound, objective, true)
     status == "Optimal" && (bound = objective)
     return SolveResult(objective, bound, _gap(bound, objective), elapsed, nodes, status, routes, "compact-mip")
 end
@@ -229,9 +224,7 @@ function _best_path(unit::Matrix{Float64}, extra::Matrix{Float64}, source::Int, 
             for v in 1:n
                 weight = unit[u, v]
                 isfinite(weight) || continue
-                penalty = extra[u, v]
-                isfinite(penalty) || continue
-                candidate = base + volume * weight + penalty
+                candidate = base + volume * weight + extra[u, v]
                 if candidate < cost[v]
                     cost[v] = candidate
                     parent[v] = u
@@ -263,6 +256,9 @@ function _without_cycles(nodes::Vector{Int})
     cleaned = Int[]
     for node in nodes
         if haskey(seen, node)
+            for removed in cleaned[(seen[node] + 1):end]
+                delete!(seen, removed)
+            end
             resize!(cleaned, seen[node])
         else
             push!(cleaned, node)
@@ -314,7 +310,7 @@ function _dense_path(unit::Matrix{Float64}, source::Int, target::Int)
     return _without_cycles(nodes), dist[target]
 end
 
-function _unit_costs(g::PeriodGraph, dual_load::Vector{Float64})
+function _unit_costs(g::PeriodGraph, load_price::Vector{Float64})
     n = size(g.dist, 1)
     unit = fill(Inf, n, n)
     @inbounds for i in 1:n, j in 1:n
@@ -324,58 +320,77 @@ function _unit_costs(g::PeriodGraph, dual_load::Vector{Float64})
         ratios = g.seg_ratios[i, j]
         value = 0.0
         for k in eachindex(arcs)
-            value += dual_load[arcs[k]] * ratios[k]
+            value += load_price[arcs[k]] * ratios[k]
         end
         unit[i, j] = value
     end
     return unit
 end
 
-function _path_load_cost(volume::Float64, ratios::Vector{Float64}, dual_load::Vector{Float64})
+_nonnegative(unit::Matrix{Float64}) = all(w -> !isfinite(w) || w >= -1e-9, unit)
+
+function _price(
+    unit::Matrix{Float64}, nonnegative::Bool, extra::Matrix{Float64}, has_extra::Bool,
+    source::Int, target::Int, maxseg::Int, volume::Float64, convexity_dual::Float64,
+)
+    if nonnegative && !has_extra
+        path, unit_cost = _dense_path(unit, source, target)
+        isempty(path) && return Int[], 0.0
+        reduced = volume * unit_cost - convexity_dual
+        reduced >= -REDUCED_COST_TOLERANCE && return Int[], reduced
+        length(path) - 1 <= maxseg && return path, reduced
+    end
+    path, cost = _best_path(unit, extra, source, target, maxseg, volume)
+    isempty(path) && return Int[], 0.0
+    return path, cost - convexity_dual
+end
+
+function _path_load_cost(volume::Float64, ratios::Vector{Float64}, load_price::Vector{Float64})
     value = 0.0
     @inbounds for a in eachindex(ratios)
-        value += dual_load[a] * ratios[a]
+        value += load_price[a] * ratios[a]
     end
     return volume * value
 end
 
-"""Solve one period, ignoring the inter-period budget."""
 function solve_period_columns(
     inst::Instance, g::PeriodGraph, time_index::Int, time_limit::Float64,
-    random_seed::Int=1,
+    random_seed::Int=1; improve::Bool=true,
 )
+    started = time()
+    deadline = started + time_limit
     demands = ndemands(inst)
     m = length(inst.arcs)
+    column = time_index + 1
     model = _configure!(Model(HiGHS.Optimizer), time_limit, random_seed)
     @variable(model, L >= 0)
     @objective(model, Min, L)
-    convexity = Vector{ConstraintRef}(undef, demands)
-    for d in 1:demands
-        convexity[d] = @constraint(model, 0.0 == 1.0)
-    end
-    load_constraints = Vector{Any}(undef, m)
+    convexity = [@constraint(model, 0.0 == 1.0) for _ in 1:demands]
+    load_rows = Vector{Any}(undef, m)
     for a in 1:m
-        load_constraints[a] = g.available[a] ?
+        load_rows[a] = g.available[a] ?
             @constraint(model, -inst.arcs[a].capacity * L <= 0) : nothing
     end
     columns = [Vector{Int}[] for _ in 1:demands]
     variables = [VariableRef[] for _ in 1:demands]
     seen = [Set{Vector{Int}}() for _ in 1:demands]
+    binary = Ref(false)
 
     function add_column!(d::Int, nodes::Vector{Int})
         nodes in seen[d] && return false
         push!(seen[d], copy(nodes))
         variable = @variable(model, lower_bound = 0.0)
+        binary[] && set_binary(variable)
         push!(variables[d], variable)
-        push!(columns[d], nodes)
+        push!(columns[d], copy(nodes))
         set_normalized_coefficient(convexity[d], variable, 1.0)
         ratios = path_ratios(g, nodes)
-        volume = inst.volume[d, time_index + 1]
+        volume = inst.volume[d, column]
         for a in 1:m
             g.available[a] || continue
             coefficient = volume * ratios[a]
             coefficient == 0 && continue
-            set_normalized_coefficient(load_constraints[a], variable, coefficient)
+            set_normalized_coefficient(load_rows[a], variable, coefficient)
         end
         return true
     end
@@ -385,259 +400,193 @@ function solve_period_columns(
     end
 
     optimize_time = 0.0
-    started = time()
-    certified = false
-    bound = 0.0
-    # HiGHS reports reduced_cost(z) = -(dual_load · a_z) - dual(convexity).
-    # Checked on setA-01 against both basic and nonbasic columns.
-    sign = -1.0
-    convexity_sign = -1.0
+    lp_certified = false
+    lower = 0.0
     checked_costs = false
-
     pricing_rounds = 0
-    for _ in 1:120
+    no_extra = zeros(inst.n, inst.n)
+    for _ in 1:PERIOD_PRICING_ROUNDS
         pricing_rounds += 1
-        remaining = time_limit - (time() - started)
+        remaining = deadline - time()
         remaining <= 1 && break
         set_time_limit_sec(model, remaining)
-        call = time()
-        optimize!(model)
-        optimize_time += time() - call
+        optimize_time += _timed_optimize!(model)
         termination_status(model) == MOI.OPTIMAL || break
         lp_obj = Float64(objective_value(model))
-        dual_load = zeros(m)
+        load_dual = zeros(m)
         for a in 1:m
-            g.available[a] && (dual_load[a] = dual(load_constraints[a]))
+            g.available[a] && (load_dual[a] = dual(load_rows[a]))
         end
-        alpha = [dual(convexity[d]) for d in 1:demands]
+        convexity_dual = [dual(convexity[d]) for d in 1:demands]
         if !checked_costs
-            for d in 1:demands
-                volume = inst.volume[d, time_index + 1]
-                for (p, variable) in enumerate(variables[d])
-                    ratios = path_ratios(g, columns[d][p])
-                    base = _path_load_cost(volume, ratios, dual_load)
-                    predicted = -base - alpha[d]
-                    abs(predicted - reduced_cost(variable)) < 1e-4 ||
-                        error("Reduced-cost formula does not match HiGHS.")
-                end
+            for d in 1:demands, (p, variable) in enumerate(variables[d])
+                ratios = path_ratios(g, columns[d][p])
+                predicted = -_path_load_cost(inst.volume[d, column], ratios, load_dual) - convexity_dual[d]
+                abs(predicted - reduced_cost(variable)) < 1e-4 ||
+                    error("Reduced-cost formula does not match HiGHS.")
             end
             checked_costs = true
         end
-        unit = _unit_costs(g, sign .* dual_load)
-        nonnegative = true
-        @inbounds for weight in unit
-            if isfinite(weight) && weight < -1e-9
-                nonnegative = false
-                break
-            end
-        end
-        extra = zeros(inst.n, inst.n)
+        unit = _unit_costs(g, -load_dual)
+        nonnegative = _nonnegative(unit)
         added = 0
-        reduced_sum = 0.0
+        correction = 0.0
         for d in 1:demands
-            volume = inst.volume[d, time_index + 1]
-            path = Int[]
-            reduced = 0.0
-            if nonnegative
-                unlimited, unit_cost = _dense_path(unit, inst.source[d], inst.target[d])
-                reduced = isempty(unlimited) ? 0.0 : volume * unit_cost + convexity_sign * alpha[d]
-                if reduced >= -1e-7 || isempty(unlimited)
-                    continue
-                elseif length(unlimited) - 1 <= inst.maxseg
-                    path = unlimited
-                end
-            end
-            if isempty(path)
-                path, cost = _best_path(unit, extra, inst.source[d], inst.target[d], inst.maxseg, volume)
-                reduced = isempty(path) ? 0.0 : cost + convexity_sign * alpha[d]
-            end
-            reduced_sum += min(reduced, 0.0)
-            if reduced < -1e-7
+            path, reduced = _price(
+                unit, nonnegative, no_extra, false, inst.source[d], inst.target[d],
+                inst.maxseg, inst.volume[d, column], convexity_dual[d],
+            )
+            correction += min(reduced, 0.0)
+            if reduced < -REDUCED_COST_TOLERANCE && !isempty(path)
                 add_column!(d, path) ||
                     error("Reduced-cost formula disagrees with a column already in the pool.")
                 added += 1
             end
         end
-        lp_bound = lp_obj + reduced_sum
-        bound = max(bound, lp_bound)
+        lower = max(lower, lp_obj + correction)
         if added == 0
-            certified = true
-            bound = max(bound, lp_obj)
+            lp_certified = true
+            lower = max(lower, lp_obj)
             break
         end
     end
-    println("pricing rounds=$pricing_rounds certified=$certified bound=$bound columns=$(sum(length, columns))")
+    println("t=$time_index pricing rounds=$pricing_rounds lp_certified=$lp_certified bound=$lower columns=$(sum(length, columns))")
     flush(stdout)
 
-    remaining = max(time_limit - (time() - started), 0.01)
     for d in 1:demands, variable in variables[d]
         set_binary(variable)
     end
-    # The linear bound is already valid. A long branch-and-bound search can
-    # improve the incumbent, but identical searches on all ten runs would
-    # consume the whole limit without changing that bound. Cap the integer
-    # search and keep the direct routing as a feasible start.
+    binary[] = true
     direct_load = maximum_load(inst, g, [columns[d][1] for d in 1:demands], time_index)
     set_start_value(L, direct_load)
     for d in 1:demands, (p, variable) in enumerate(variables[d])
         set_start_value(variable, p == 1 ? 1.0 : 0.0)
     end
-    set_time_limit_sec(model, remaining)
-    # Large pools make every branch-and-bound node expensive. The linear bound
-    # is already certified, so the node cap only limits the incumbent search.
-    node_cap = sum(length, columns) > 2_000 ? 20 : 400
-    _set_node_cap!(model, node_cap)
-    call = time()
-    optimize!(model)
-    optimize_time += time() - call
+    set_time_limit_sec(model, max(deadline - time(), 0.01))
+    optimize_time += _timed_optimize!(model)
     nodes = _node_count(model)
-    routes = Vector{Vector{Int}}()
-    if has_values(model)
-        for d in 1:demands
-            values = [value(variable) for variable in variables[d]]
-            push!(routes, columns[d][argmax(values)])
-        end
-    else
-        routes = direct_routes(inst, g)
-    end
+    routes = has_values(model) ? _selected_routes(columns, variables) : direct_routes(inst, g)
     objective = try
         maximum_load(inst, g, routes, time_index)
     catch
         NaN
     end
 
-    # FULL_TIME: only stop when the wall-clock budget is exhausted (or gap closed).
-    # HiGHS may prove the current pool optimal in milliseconds; we then spend the
-    # remaining time generating more columns and re-solving until time is gone.
-    if _env_flag("FULL_TIME") && isfinite(objective)
-        waypoint_state = ones(Int, demands)
-        full_round = 0
-        total_added = 0
-        _enable_full_time_mip!(model)
-        deadline = started + time_limit
-        while time() < deadline - 1.0
-            _gap(min(max(bound, 0.0), objective), objective) <= 1e-6 && break
-            remaining = deadline - time()
-            full_round += 1
-
-            # Spend part of the budget on column generation so we do not idle
-            # when the MIP proves the current pool optimal immediately.
-            gen_budget = min(max(remaining * 0.25, 5.0), remaining - 1.0, 60.0)
-            gen_deadline = time() + gen_budget
-            added = 0
-            gen_seed = random_seed + full_round
-            while time() < gen_deadline
-                batch = _diversify_columns!(
-                    inst, g, add_column!, variables, waypoint_state, gen_seed;
-                    as_binary=true, limit=500,
-                )
-                gen_seed += 1
-                if batch == 0
-                    batch = _diversify_two_waypoints!(
-                        inst, g, add_column!, variables, gen_seed;
-                        as_binary=true, limit=500,
-                    )
-                    gen_seed += 1
-                end
-                if batch == 0
-                    batch = _diversify_random_paths!(
-                        inst, g, add_column!, variables, gen_seed, time_index;
-                        as_binary=true, limit=200,
-                    )
-                    gen_seed += 1
-                end
-                added += batch
-                batch == 0 && break
-            end
-            total_added += added
-            remaining = deadline - time()
-            remaining <= 1.0 && break
-            println(
-                "full-time round=$full_round added=$added columns=$(sum(length, columns)) ",
-                "remaining=$(round(remaining; digits=1))s obj=$objective",
-            )
-            flush(stdout)
-
-            set_optimizer_attribute(model, "random_seed", random_seed + full_round)
-            _set_node_cap!(model, node_cap)
-            set_time_limit_sec(model, remaining)
-            set_start_value(L, objective)
-            chosen = Dict{Int,Int}()
-            for d in 1:demands
-                for (p, path) in enumerate(columns[d])
-                    if path == routes[d]
-                        chosen[d] = p
-                        break
-                    end
-                end
-            end
-            for d in 1:demands, (p, variable) in enumerate(variables[d])
-                set_start_value(variable, get(chosen, d, 1) == p ? 1.0 : 0.0)
-            end
-            call = time()
-            optimize!(model)
-            mip_elapsed = time() - call
-            optimize_time += mip_elapsed
-            nodes += _node_count(model)
-
-            if has_values(model)
-                candidate = Vector{Vector{Int}}(undef, demands)
-                for d in 1:demands
-                    values = [value(variable) for variable in variables[d]]
-                    candidate[d] = columns[d][argmax(values)]
-                end
-                candidate_obj = try
-                    maximum_load(inst, g, candidate, time_index)
-                catch
-                    NaN
-                end
-                if isfinite(candidate_obj) && candidate_obj < objective - 1e-12
-                    routes = candidate
-                    objective = candidate_obj
-                end
-            end
-
-            # MIP consumed (almost) the whole remaining budget → time is up.
-            if mip_elapsed >= remaining - 2.0
-                break
-            end
-            # Cannot grow the pool any further and MIP is instant → stop.
-            if added == 0 && mip_elapsed < 1.0
-                println(
-                    "full-time: pool exhausted after $full_round round(s); ",
-                    "$(round(max(deadline - time(), 0.0); digits=1))s unused",
-                )
-                flush(stdout)
-                break
-            end
-        end
-        println(
-            "full-time done rounds=$full_round added=$total_added obj=$objective ",
-            "wall=$(round(time() - started; digits=1))s",
+    if improve && isfinite(objective)
+        objective, routes, extra_time, extra_nodes = _improve_period!(
+            inst, g, time_index, model, L, add_column!, columns, variables,
+            routes, objective, lower, deadline, random_seed,
         )
-        flush(stdout)
+        optimize_time += extra_time
+        nodes += extra_nodes
     end
 
     if !isfinite(objective)
-        return SolveResult(NaN, bound, NaN, optimize_time, nodes, "Infeasible", [routes], "column-generation"), columns
+        result = SolveResult(NaN, lower, NaN, optimize_time, nodes, "Infeasible", [routes], "column-generation")
+        return PeriodSolve(result, columns, routes, lower)
     end
-    bound = min(max(bound, 0.0), objective)
-    status = certified ? _status(bound, objective, true) : "Not Optimal"
+    bound = min(max(lower, 0.0), objective)
+    status = _status(bound, objective, true)
     status == "Optimal" && (bound = objective)
-    return SolveResult(
+    result = SolveResult(
         objective, bound, _gap(bound, objective), optimize_time, nodes, status, [routes], "column-generation",
-    ), columns
+    )
+    return PeriodSolve(result, columns, routes, max(lower, 0.0))
 end
 
-function _diversify_columns!(
-    inst::Instance, g::PeriodGraph, add_column!, variables, waypoint_state::Vector{Int}, seed::Int;
-    as_binary::Bool=false, limit::Int=200,
+function _selected_routes(columns, variables)
+    return [columns[d][argmax([value(v) for v in variables[d]])] for d in eachindex(columns)]
+end
+
+function _generation_budget(remaining::Float64)
+    return min(max(remaining * 0.25, 5.0), remaining - 1.0, 60.0)
+end
+
+function _generate_columns!(inst::Instance, generators, deadline::Float64, seed::Int)
+    added = 0
+    while time() < deadline
+        batch = 0
+        for (g, add!, waypoint_state) in generators
+            count = _diversify_one_waypoint!(inst, g, add!, waypoint_state, seed; limit=500)
+            seed += 1
+            if count == 0
+                count = _diversify_two_waypoints!(inst, g, add!, seed; limit=500)
+                seed += 1
+            end
+            if count == 0
+                count = _diversify_random_paths!(inst, g, add!, seed; limit=200)
+                seed += 1
+            end
+            batch += count
+        end
+        added += batch
+        batch == 0 && break
+    end
+    return added
+end
+
+function _improve_period!(
+    inst, g, time_index, model, L, add_column!, columns, variables,
+    routes, objective, lower, deadline, random_seed,
 )
     demands = ndemands(inst)
+    waypoint_state = ones(Int, demands)
+    optimize_time = 0.0
+    nodes = 0
+    iteration = 0
+    total_added = 0
+    _exhaustive_mip!(model)
+    while time() < deadline - 1.0
+        certified(min(max(lower, 0.0), objective), objective) && break
+        iteration += 1
+        remaining = deadline - time()
+        added = _generate_columns!(
+            inst, [(g, add_column!, waypoint_state)],
+            time() + _generation_budget(remaining), random_seed + iteration,
+        )
+        total_added += added
+        remaining = deadline - time()
+        remaining <= 1.0 && break
+        println("t=$time_index improve round=$iteration added=$added columns=$(sum(length, columns)) remaining=$(round_seconds(remaining))s obj=$objective")
+        flush(stdout)
+
+        set_optimizer_attribute(model, "random_seed", random_seed + iteration)
+        set_time_limit_sec(model, remaining)
+        set_start_value(L, objective)
+        for d in 1:demands, (p, variable) in enumerate(variables[d])
+            set_start_value(variable, columns[d][p] == routes[d] ? 1.0 : 0.0)
+        end
+        elapsed = _timed_optimize!(model)
+        optimize_time += elapsed
+        nodes += _node_count(model)
+        if has_values(model)
+            candidate = _selected_routes(columns, variables)
+            candidate_obj = try
+                maximum_load(inst, g, candidate, time_index)
+            catch
+                NaN
+            end
+            if isfinite(candidate_obj) && candidate_obj < objective - 1e-12
+                routes = candidate
+                objective = candidate_obj
+            end
+        end
+        elapsed >= remaining - 2.0 && break
+        added == 0 && elapsed < 1.0 && break
+    end
+    println("t=$time_index improve done rounds=$iteration added=$total_added obj=$objective")
+    flush(stdout)
+    return objective, routes, optimize_time, nodes
+end
+
+round_seconds(value::Float64) = round(value; digits=1)
+
+function _diversify_one_waypoint!(
+    inst::Instance, g::PeriodGraph, add!, waypoint_state::Vector{Int}, seed::Int; limit::Int=200,
+)
     added = 0
     rng = Random.MersenneTwister(seed)
-    order = randperm(rng, demands)
-    for d in order
+    for d in randperm(rng, ndemands(inst))
         added >= limit && break
         source = inst.source[d]
         target = inst.target[d]
@@ -652,26 +601,19 @@ function _diversify_columns!(
             reachable(g, source, waypoint) && reachable(g, waypoint, target) || continue
             path = [source, waypoint, target]
             length(path) - 1 <= inst.maxseg || continue
-            if add_column!(d, path)
-                as_binary && set_binary(variables[d][end])
-                added += 1
-            end
+            add!(d, path) && (added += 1)
         end
     end
     return added
 end
 
-function _diversify_two_waypoints!(
-    inst::Instance, g::PeriodGraph, add_column!, variables, seed::Int;
-    as_binary::Bool=false, limit::Int=200,
-)
+function _diversify_two_waypoints!(inst::Instance, g::PeriodGraph, add!, seed::Int; limit::Int=200)
     inst.maxseg < 3 && return 0
     demands = ndemands(inst)
     added = 0
     rng = Random.MersenneTwister(seed)
     attempts = 0
-    max_attempts = limit * 20
-    while added < limit && attempts < max_attempts
+    while added < limit && attempts < limit * 20
         attempts += 1
         d = rand(rng, 1:demands)
         source = inst.source[d]
@@ -682,39 +624,28 @@ function _diversify_two_waypoints!(
         w2 = candidates[rand(rng, 1:length(candidates))]
         w1 == w2 && continue
         reachable(g, source, w1) && reachable(g, w1, w2) && reachable(g, w2, target) || continue
-        path = [source, w1, w2, target]
-        if add_column!(d, path)
-            as_binary && set_binary(variables[d][end])
-            added += 1
-        end
+        add!(d, [source, w1, w2, target]) && (added += 1)
     end
     return added
 end
 
-function _diversify_random_paths!(
-    inst::Instance, g::PeriodGraph, add_column!, variables, seed::Int, time_index::Int;
-    as_binary::Bool=false, limit::Int=200,
-)
+function _diversify_random_paths!(inst::Instance, g::PeriodGraph, add!, seed::Int; limit::Int=200)
     demands = ndemands(inst)
     added = 0
     rng = Random.MersenneTwister(seed)
     n = inst.n
+    extra = zeros(n, n)
     for _ in 1:limit
         d = rand(rng, 1:demands)
-        volume = max(inst.volume[d, time_index + 1], 1e-9)
         unit = fill(Inf, n, n)
         @inbounds for i in 1:n, j in 1:n
             i == j && continue
             isempty(g.seg_arcs[i, j]) && continue
             unit[i, j] = rand(rng)
         end
-        extra = zeros(n, n)
-        path, _ = _best_path(unit, extra, inst.source[d], inst.target[d], inst.maxseg, volume)
+        path, _ = _best_path(unit, extra, inst.source[d], inst.target[d], inst.maxseg, 1.0)
         isempty(path) && continue
-        if add_column!(d, path)
-            as_binary && set_binary(variables[d][end])
-            added += 1
-        end
+        add!(d, path) && (added += 1)
     end
     return added
 end
@@ -722,9 +653,9 @@ end
 function solve_by_columns(
     inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64, random_seed::Int=1,
 )
-    started = time()
     if length(graphs) == 1
-        result, _ = solve_period_columns(inst, graphs[1], 0, time_limit, random_seed)
+        period = solve_period_columns(inst, graphs[1], 0, time_limit, random_seed; improve=true)
+        result = period.result
         objective = validate_solution(inst, graphs, result.routes)
         bound = min(result.bound, objective)
         return SolveResult(
@@ -732,59 +663,219 @@ function solve_by_columns(
             _status(bound, objective, true), result.routes, result.method,
         )
     end
+    return solve_joint_columns(inst, graphs, time_limit, random_seed)
+end
 
-    first, pool1 = solve_period_columns(inst, graphs[1], 0, 0.4 * time_limit, random_seed)
-    second, pool2 = solve_period_columns(inst, graphs[2], 1, 0.4 * time_limit, random_seed + 1)
-    # Each certified single-period bound remains valid after the budget is added.
-    lower = max(first.bound, second.bound, 0.0)
-    joint = _joint_mip_explicit(
-        inst, graphs, [_enrich_pool(inst, graphs[1], pool1), _enrich_pool(inst, graphs[2], pool2)],
-        time_limit - (time() - started), lower, random_seed + 2,
-    )
-    routes = _best_joint_routes(inst, graphs, joint.routes, first.routes[1], second.routes[1])
-    objective = validate_solution(inst, graphs, routes)
-    bound = min(lower, objective)
-    status = _status(bound, objective, true)
-    status == "Optimal" && (bound = objective)
-    return SolveResult(
-        objective, bound, _gap(bound, objective),
-        first.optimize_time + second.optimize_time + joint.optimize_time,
-        first.nodes + second.nodes + joint.nodes,
-        status, routes, "column-generation",
+mutable struct JointMaster
+    model::Model
+    L::VariableRef
+    convexity::Matrix{ConstraintRef}
+    load::Vector{Vector{Any}}
+    budget::ConstraintRef
+    columns::Matrix{Vector{Vector{Int}}}
+    variables::Matrix{Vector{VariableRef}}
+    index::Matrix{Dict{Vector{Int},Int}}
+    changes::Vector{Dict{Tuple{Int,Int},Tuple{VariableRef,ConstraintRef,ConstraintRef}}}
+    binary::Bool
+end
+
+function _joint_master(inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64, random_seed::Int)
+    model = _configure!(Model(HiGHS.Optimizer), time_limit, random_seed)
+    demands = ndemands(inst)
+    @variable(model, L >= 0)
+    @objective(model, Min, L)
+    convexity = Matrix{ConstraintRef}(undef, 2, demands)
+    for t in 1:2, d in 1:demands
+        convexity[t, d] = @constraint(model, 0.0 == 1.0)
+    end
+    load = [Any[g.available[a] ? @constraint(model, -arc.capacity * L <= 0) : nothing
+                for (a, arc) in enumerate(inst.arcs)] for g in graphs]
+    budget = @constraint(model, 0.0 <= Float64(inst.budget[1]))
+    return JointMaster(
+        model, L, convexity, load, budget,
+        [Vector{Int}[] for _ in 1:2, _ in 1:demands],
+        [VariableRef[] for _ in 1:2, _ in 1:demands],
+        [Dict{Vector{Int},Int}() for _ in 1:2, _ in 1:demands],
+        [Dict{Tuple{Int,Int},Tuple{VariableRef,ConstraintRef,ConstraintRef}}() for _ in 1:demands],
+        true,
     )
 end
 
-struct _JointMIP
-    routes::Vector{Vector{Vector{Int}}}
-    optimize_time::Float64
-    nodes::Int
-    bound_hint::Float64
+function add_joint_column!(
+    master::JointMaster, inst::Instance, graphs::Vector{PeriodGraph}, t::Int, d::Int, nodes::Vector{Int},
+)
+    haskey(master.index[t, d], nodes) && return false
+    route_ok(inst, graphs[t], nodes, d) || return false
+    model = master.model
+    z = @variable(model, lower_bound = 0.0)
+    master.binary && set_binary(z)
+    push!(master.variables[t, d], z)
+    push!(master.columns[t, d], copy(nodes))
+    master.index[t, d][copy(nodes)] = length(master.columns[t, d])
+    set_normalized_coefficient(master.convexity[t, d], z, 1.0)
+    volume = inst.volume[d, t]
+    ratios = path_ratios(graphs[t], nodes)
+    for a in eachindex(inst.arcs)
+        graphs[t].available[a] || continue
+        coefficient = volume * ratios[a]
+        coefficient == 0 && continue
+        set_normalized_coefficient(master.load[t][a], z, coefficient)
+    end
+    direction = t == 1 ? 1.0 : -1.0
+    for segment in segment_set(nodes)
+        y, up, down = get!(master.changes[d], segment) do
+            y = @variable(model, lower_bound = 0.0)
+            up = @constraint(model, 1.0 * y >= 0.0)
+            down = @constraint(model, 1.0 * y >= 0.0)
+            set_normalized_coefficient(master.budget, y, 1.0)
+            (y, up, down)
+        end
+        set_normalized_coefficient(up, z, direction)
+        set_normalized_coefficient(down, z, -direction)
+    end
+    return true
 end
 
-function _best_joint_routes(inst, graphs, mip_routes, first_routes, second_routes)
-    repaired = _fit_budget(inst, graphs, first_routes, second_routes)
-    best = mip_routes
-    best_load = try
-        validate_solution(inst, graphs, mip_routes)
+function _add_to_valid_periods!(master, inst, graphs, t::Int, d::Int, nodes::Vector{Int})
+    added = add_joint_column!(master, inst, graphs, t, d, nodes)
+    other = 3 - t
+    route_ok(inst, graphs[other], nodes, d) &&
+        (added = add_joint_column!(master, inst, graphs, other, d, nodes) || added)
+    return added
+end
+
+function _set_joint_start!(master::JointMaster, inst::Instance, graphs, routes, objective::Float64)
+    set_start_value(master.L, objective)
+    for t in 1:2, d in 1:ndemands(inst)
+        chosen = get(master.index[t, d], routes[t][d], 0)
+        for (p, z) in enumerate(master.variables[t, d])
+            set_start_value(z, p == chosen ? 1.0 : 0.0)
+        end
+    end
+    for d in 1:ndemands(inst)
+        first = segment_set(routes[1][d])
+        second = segment_set(routes[2][d])
+        for (segment, (y, _, _)) in master.changes[d]
+            set_start_value(y, abs(Float64(segment in second) - Float64(segment in first)))
+        end
+    end
+end
+
+function _solve_joint_mip!(master::JointMaster, inst, graphs, start_routes, start_objective, time_limit, seed)
+    set_optimizer_attribute(master.model, "random_seed", seed)
+    set_time_limit_sec(master.model, max(time_limit, 0.01))
+    _set_joint_start!(master, inst, graphs, start_routes, start_objective)
+    elapsed = _timed_optimize!(master.model)
+    nodes = _node_count(master.model)
+    has_values(master.model) || return nothing, Inf, elapsed, nodes
+    routes = [_selected_routes(master.columns[t, :], master.variables[t, :]) for t in 1:2]
+    objective = try
+        validate_solution(inst, graphs, routes)
     catch
         Inf
     end
-    repaired_load = try
-        validate_solution(inst, graphs, repaired)
-    catch
-        Inf
-    end
-    if repaired_load < best_load
-        return repaired
-    end
-    return best
+    return routes, objective, elapsed, nodes
 end
 
-function _route_ok(inst, g, route, d)
-    route[1] == inst.source[d] && route[end] == inst.target[d] || return false
-    length(route) - 1 <= inst.maxseg || return false
-    length(unique(route)) == length(route) || return false
-    return all(reachable(g, route[k], route[k + 1]) for k in 1:(length(route) - 1))
+function _joint_reduced_cost(master::JointMaster, inst, graphs, t, d, p, load_dual, convexity_dual, change_dual)
+    nodes = master.columns[t, d][p]
+    value = -_path_load_cost(inst.volume[d, t], path_ratios(graphs[t], nodes), load_dual[t]) - convexity_dual[t, d]
+    direction = t == 1 ? 1.0 : -1.0
+    for segment in segment_set(nodes)
+        up, down = change_dual[d][segment]
+        value -= direction * (up - down)
+    end
+    return value
+end
+
+function _joint_pricing!(master::JointMaster, inst::Instance, graphs::Vector{PeriodGraph}, deadline::Float64)
+    demands = ndemands(inst)
+    model = master.model
+    restore = relax_integrality(model)
+    master.binary = false
+    optimize_time = 0.0
+    lower = 0.0
+    best_lp = Inf
+    stall = 0
+    added_total = 0
+    rounds = 0
+    lp_certified = false
+    extra = zeros(inst.n, inst.n)
+    while rounds < JOINT_PRICING_ROUNDS && time() < deadline - 1.0
+        rounds += 1
+        set_time_limit_sec(model, deadline - time())
+        optimize_time += _timed_optimize!(model)
+        termination_status(model) == MOI.OPTIMAL || break
+        lp_obj = Float64(objective_value(model))
+        load_dual = [[g.available[a] ? dual(master.load[t][a]) : 0.0 for a in eachindex(inst.arcs)]
+                     for (t, g) in enumerate(graphs)]
+        convexity_dual = [dual(master.convexity[t, d]) for t in 1:2, d in 1:demands]
+        change_dual = [Dict(segment => (dual(up), dual(down)) for (segment, (_, up, down)) in master.changes[d])
+                       for d in 1:demands]
+        if rounds == 1
+            for t in 1:2, d in 1:demands, (p, z) in enumerate(master.variables[t, d])
+                predicted = _joint_reduced_cost(master, inst, graphs, t, d, p, load_dual, convexity_dual, change_dual)
+                abs(predicted - reduced_cost(z)) < 1e-4 ||
+                    error("Joint reduced-cost formula does not match HiGHS.")
+            end
+        end
+        candidates = Tuple{Int,Int,Vector{Int}}[]
+        correction = 0.0
+        for t in 1:2
+            unit = _unit_costs(graphs[t], -load_dual[t])
+            nonnegative = _nonnegative(unit)
+            direction = t == 1 ? 1.0 : -1.0
+            for d in 1:demands
+                touched = Tuple{Int,Int}[]
+                for (segment, (up, down)) in change_dual[d]
+                    penalty = -direction * (up - down)
+                    abs(penalty) <= 1e-12 && continue
+                    extra[segment[1], segment[2]] = penalty
+                    push!(touched, segment)
+                end
+                path, reduced = _price(
+                    unit, nonnegative, extra, !isempty(touched), inst.source[d], inst.target[d],
+                    inst.maxseg, inst.volume[d, t], convexity_dual[t, d],
+                )
+                for (i, j) in touched
+                    extra[i, j] = 0.0
+                end
+                correction += min(reduced, 0.0)
+                reduced < -REDUCED_COST_TOLERANCE && !isempty(path) && push!(candidates, (t, d, path))
+            end
+        end
+        lower = max(lower, lp_obj + correction)
+        if correction >= -REDUCED_COST_TOLERANCE
+            lp_certified = true
+            lower = max(lower, lp_obj)
+            break
+        end
+        added = 0
+        for (t, d, path) in candidates
+            added_total >= JOINT_PRICING_COLUMNS && break
+            if add_joint_column!(master, inst, graphs, t, d, path)
+                added += 1
+                added_total += 1
+            end
+        end
+        added == 0 && break
+        if lp_obj < best_lp - 1e-9
+            best_lp = lp_obj
+            stall = 0
+        else
+            stall += 1
+            stall >= JOINT_PRICING_STALL && break
+        end
+        added_total >= JOINT_PRICING_COLUMNS && break
+    end
+    restore()
+    for t in 1:2, d in 1:demands, z in master.variables[t, d]
+        is_binary(z) || set_binary(z)
+    end
+    master.binary = true
+    println("joint pricing rounds=$rounds lp_certified=$lp_certified bound=$lower added=$added_total")
+    flush(stdout)
+    return max(lower, 0.0), optimize_time
 end
 
 function _fit_budget(inst, graphs, first_routes, second_routes)
@@ -792,17 +883,16 @@ function _fit_budget(inst, graphs, first_routes, second_routes)
     left = [copy(first_routes[d]) for d in 1:demands]
     right = [copy(second_routes[d]) for d in 1:demands]
     for d in 1:demands
-        _route_ok(inst, graphs[1], left[d], d) || (left[d] = [inst.source[d], inst.target[d]])
-        _route_ok(inst, graphs[2], right[d], d) || (right[d] = [inst.source[d], inst.target[d]])
+        route_ok(inst, graphs[1], left[d], d) || (left[d] = [inst.source[d], inst.target[d]])
+        route_ok(inst, graphs[2], right[d], d) || (right[d] = [inst.source[d], inst.target[d]])
     end
     order = sort(1:demands, by = d -> route_distance(left[d], right[d]), rev = true)
     for d in order
         route_distance(left[d], right[d]) == 0 && break
-        used = sum(route_distance(left[k], right[k]) for k in 1:demands)
-        used <= inst.budget[1] && break
-        if _route_ok(inst, graphs[2], left[d], d)
+        reconfiguration_cost(left, right) <= inst.budget[1] && break
+        if route_ok(inst, graphs[2], left[d], d)
             right[d] = copy(left[d])
-        elseif _route_ok(inst, graphs[1], right[d], d)
+        elseif route_ok(inst, graphs[1], right[d], d)
             left[d] = copy(right[d])
         else
             left[d] = [inst.source[d], inst.target[d]]
@@ -817,14 +907,13 @@ function _enrich_pool(inst::Instance, g::PeriodGraph, generated::Vector{Vector{V
     for d in 1:ndemands(inst)
         direct = [inst.source[d], inst.target[d]]
         direct in pool[d] || pushfirst!(pool[d], direct)
-        if length(pool[d]) < 6
-            for waypoint in _waypoint_sample(inst.n, inst.source[d], inst.target[d])
-                reachable(g, inst.source[d], waypoint) && reachable(g, waypoint, inst.target[d]) || continue
-                path = [inst.source[d], waypoint, inst.target[d]]
-                path in pool[d] && continue
-                push!(pool[d], path)
-                length(pool[d]) >= 6 && break
-            end
+        length(pool[d]) >= ENRICHED_POOL_SIZE && continue
+        for waypoint in _waypoint_sample(inst.n, inst.source[d], inst.target[d])
+            reachable(g, inst.source[d], waypoint) && reachable(g, waypoint, inst.target[d]) || continue
+            path = [inst.source[d], waypoint, inst.target[d]]
+            path in pool[d] && continue
+            push!(pool[d], path)
+            length(pool[d]) >= ENRICHED_POOL_SIZE && break
         end
     end
     return pool
@@ -837,97 +926,96 @@ function _waypoint_sample(n::Int, source::Int, target::Int)
     return candidates[1:stride:end]
 end
 
-function _joint_mip_explicit(inst, graphs, pools, time_limit, known_bound, random_seed::Int=1)
-    model = _configure!(Model(HiGHS.Optimizer), max(time_limit, 0.01), random_seed)
-    demands = ndemands(inst)
-    @variable(model, L >= 0)
-    @objective(model, Min, L)
-    z = Matrix{Vector{VariableRef}}(undef, 2, demands)
-    for t in 1:2, d in 1:demands
-        z[t, d] = [@variable(model, binary=true) for _ in pools[t][d]]
-        @constraint(model, sum(z[t, d]) == 1)
-        # Prefer the direct segment path as a feasible warm start.
-        set_start_value(z[t, d][1], 1.0)
-        for p in 2:length(z[t, d])
-            set_start_value(z[t, d][p], 0.0)
-        end
+function build_joint_master(
+    inst::Instance, graphs::Vector{PeriodGraph}, first::PeriodSolve, second::PeriodSolve,
+    time_limit::Float64, random_seed::Int,
+)
+    master = _joint_master(inst, graphs, time_limit, random_seed)
+    pools = [_enrich_pool(inst, graphs[1], first.columns), _enrich_pool(inst, graphs[2], second.columns)]
+    for t in 1:2, d in 1:ndemands(inst), path in pools[t][d]
+        _add_to_valid_periods!(master, inst, graphs, t, d, path)
     end
-    sparse = [[Tuple{Vector{Int},Vector{Float64}}[] for _ in 1:demands] for _ in 1:2]
-    for t in 1:2, d in 1:demands, nodes in pools[t][d]
-        ratios = path_ratios(graphs[t], nodes)
-        arcs = Int[]
-        values = Float64[]
-        for a in eachindex(ratios)
-            ratios[a] == 0 && continue
-            push!(arcs, a)
-            push!(values, ratios[a])
-        end
-        push!(sparse[t][d], (arcs, values))
+    start = _fit_budget(inst, graphs, first.routes, second.routes)
+    for t in 1:2, d in 1:ndemands(inst)
+        add_joint_column!(master, inst, graphs, t, d, start[t][d])
     end
-    for t in 1:2
-        expressions = [AffExpr(0.0) for _ in inst.arcs]
-        for (a, arc) in enumerate(inst.arcs)
-            graphs[t].available[a] && add_to_expression!(expressions[a], L, -arc.capacity)
-        end
-        for d in 1:demands
-            volume = inst.volume[d, t]
-            volume == 0 && continue
-            for (p, (arcs, values)) in enumerate(sparse[t][d])
-                for k in eachindex(arcs)
-                    graphs[t].available[arcs[k]] || continue
-                    add_to_expression!(expressions[arcs[k]], z[t, d][p], volume * values[k])
-                end
-            end
-        end
-        for a in eachindex(inst.arcs)
-            graphs[t].available[a] && @constraint(model, expressions[a] <= 0)
-        end
-    end
-    budget = AffExpr(0.0)
-    for d in 1:demands
-        segments = Set{Tuple{Int,Int}}()
-        for t in 1:2, nodes in pools[t][d]
-            union!(segments, segment_set(nodes))
-        end
-        for segment in segments
-            y = @variable(model, lower_bound = 0.0)
-            first = AffExpr(0.0)
-            second = AffExpr(0.0)
-            for (p, nodes) in enumerate(pools[1][d])
-                segment in segment_set(nodes) && add_to_expression!(first, z[1, d][p], 1.0)
-            end
-            for (p, nodes) in enumerate(pools[2][d])
-                segment in segment_set(nodes) && add_to_expression!(second, z[2, d][p], 1.0)
-            end
-            @constraint(model, y >= second - first)
-            @constraint(model, y >= first - second)
-            add_to_expression!(budget, y, 1.0)
-        end
-    end
-    @constraint(model, budget <= inst.budget[1])
-    for t in 1:2, d in 1:demands, (p, variable) in enumerate(z[t, d])
-        set_start_value(variable, p == 1 ? 1.0 : 0.0)
-    end
-    column_count = sum(length(pool) for pool in pools for paths in pool)
-    _set_node_cap!(model, column_count > 2_000 ? 20 : 400)
+    return master, start
+end
+
+function solve_joint_columns(
+    inst::Instance, graphs::Vector{PeriodGraph}, time_limit::Float64, random_seed::Int=1,
+)
     started = time()
-    optimize!(model)
-    elapsed = time() - started
-    routes = [direct_routes(inst, graphs[1]), direct_routes(inst, graphs[2])]
-    if has_values(model) && termination_status(model) != MOI.INFEASIBLE
-        for t in 1:2
-            for d in 1:demands
-                values = [value(variable) for variable in z[t, d]]
-                routes[t][d] = pools[t][d][argmax(values)]
-            end
+    deadline = started + time_limit
+    first = solve_period_columns(inst, graphs[1], 0, PERIOD_TIME_SHARE * time_limit, random_seed; improve=false)
+    second = solve_period_columns(inst, graphs[2], 1, PERIOD_TIME_SHARE * time_limit, random_seed + 1; improve=false)
+    optimize_time = first.result.optimize_time + second.result.optimize_time
+    nodes = first.result.nodes + second.result.nodes
+    lower = max(first.lower, second.lower, 0.0)
+
+    master, best_routes = build_joint_master(inst, graphs, first, second, max(deadline - time(), 0.01), random_seed + 2)
+    best = validate_solution(inst, graphs, best_routes)
+
+    function accept!(routes, objective)
+        if routes !== nothing && objective < best - 1e-12
+            best_routes = routes
+            best = objective
         end
     end
-    try
-        validate_solution(inst, graphs, routes)
-    catch
-        routes = [direct_routes(inst, graphs[1]), direct_routes(inst, graphs[2])]
+
+    routes, objective, elapsed, count = _solve_joint_mip!(
+        master, inst, graphs, best_routes, best, JOINT_WARMUP_SHARE * (deadline - time()), random_seed + 2,
+    )
+    optimize_time += elapsed
+    nodes += count
+    accept!(routes, objective)
+
+    if !certified(min(lower, best), best)
+        pricing_deadline = time() + JOINT_PRICING_SHARE * max(deadline - time(), 0.0)
+        joint_lower, elapsed = _joint_pricing!(master, inst, graphs, pricing_deadline)
+        optimize_time += elapsed
+        lower = max(lower, joint_lower)
     end
-    # The restricted master's dual bound is not valid for columns outside its
-    # pool, so the only global lower bound retained is `known_bound`.
-    return _JointMIP(routes, elapsed, _node_count(model), known_bound)
+
+    if !certified(min(lower, best), best) && deadline - time() > 1.0
+        routes, objective, elapsed, count = _solve_joint_mip!(
+            master, inst, graphs, best_routes, best, deadline - time(), random_seed + 3,
+        )
+        optimize_time += elapsed
+        nodes += count
+        accept!(routes, objective)
+    end
+
+    _exhaustive_mip!(master.model)
+    waypoint_state = [ones(Int, ndemands(inst)) for _ in 1:2]
+    generators = [
+        (graphs[t], (d, path) -> _add_to_valid_periods!(master, inst, graphs, t, d, path), waypoint_state[t])
+        for t in 1:2
+    ]
+    iteration = 0
+    while time() < deadline - 1.0 && !certified(min(lower, best), best)
+        iteration += 1
+        remaining = deadline - time()
+        added = _generate_columns!(inst, generators, time() + _generation_budget(remaining), random_seed + 10 * iteration)
+        remaining = deadline - time()
+        remaining <= 1.0 && break
+        println("joint improve round=$iteration added=$added remaining=$(round_seconds(remaining))s obj=$best")
+        flush(stdout)
+        routes, objective, elapsed, count = _solve_joint_mip!(
+            master, inst, graphs, best_routes, best, remaining, random_seed + 3 + iteration,
+        )
+        optimize_time += elapsed
+        nodes += count
+        accept!(routes, objective)
+        elapsed >= remaining - 2.0 && break
+        added == 0 && elapsed < 1.0 && break
+    end
+
+    objective = validate_solution(inst, graphs, best_routes)
+    bound = min(lower, objective)
+    status = _status(bound, objective, true)
+    status == "Optimal" && (bound = objective)
+    return SolveResult(
+        objective, bound, _gap(bound, objective), optimize_time, nodes, status, best_routes, "column-generation",
+    )
 end

@@ -1,0 +1,44 @@
+\section{Experimental protocol}
+\label{sec:protocol}
+
+The experiments use all twenty instances in Set~A. Their sizes range from 20 to 400 vertices, 80 to
+2000 directed links, and 20 to 6000 demands. Two experiments are performed for each instance. The
+first considers only period~0 and omits the reconfiguration budget, as required in Step~6 of the
+project. The second considers periods~0 and~1 together and includes the budget constraint, as
+required in Steps~7--9.
+
+The period-0 time limit is 1800 seconds (30 minutes), while the two-period limit is 3600 seconds (one
+hour). Each experiment is repeated ten times using seeds 2026--2035. Every solver process uses one
+thread. The code is run with Julia~1.13.2, JuMP~1.32.1~\citep{jump2017}, and HiGHS~1.26.0 on 64-bit
+Linux~6.8.0. The machine has two Intel Xeon Platinum 8558 processors, with 44 physical cores per
+socket and two hardware threads per core (88 physical cores and 176 logical CPUs in total), and
+1.7\,TiB of RAM. Although the machine has many cores, the experiments are executed sequentially: only
+one instance and one seed are active at a time, and HiGHS uses one thread. Thus, no two experimental
+jobs compete for CPU or memory. The operating-system background load was not logged, so no numerical
+load average is claimed.
+
+For every run, the output file records the instance size, checked MLU, best valid lower bound,
+relative gap, solver time, number of branch-and-bound nodes, solution status, and solution method. In
+accordance with the project instructions, \emph{solver time} includes only elapsed time inside calls
+to \texttt{optimize!}. When an algorithm makes several solver calls, these times and their
+branch-and-bound node counts are summed. Data loading, graph construction, coefficient computation,
+pricing, validation, and file writing are excluded. A run may stop before its limit when the lower
+bound certifies the incumbent. Small overruns are possible because a solver call is timed when it
+returns.
+
+The original experiment files do not contain end-to-end wall-clock time. Consequently, the tables
+report the required solver time but do not present it as the total running time of the algorithm. In
+particular, a small solver time for a column-generation run does not include shortest-path
+preprocessing, pricing, or column construction. Measuring total wall-clock time would require
+rerunning the experiments with an outer timer.
+
+Tables~\ref{tab:t0} and~\ref{tab:full} report the best MLU, mean MLU, sample standard deviation of
+MLU, mean solver time, mean gap, mean node count, and number of certified runs out of ten. The gap of
+one run is
+\[
+\mathrm{gap}=\max\left\{0,\,1-\frac{\mathrm{LB}}{\mathrm{UB}}\right\},
+\]
+where UB is the checked MLU and LB is a valid lower bound. The \emph{Cert.} column makes mixed outcomes
+explicit; for example, 8/10 means that eight runs certify the scalar MLU optimum and two do not. An
+infeasible run would be reported separately, but every run in this study produced a feasible
+incumbent.

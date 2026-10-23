@@ -1,0 +1,22 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+This project developed a complete workflow for the Orange $T$-Adaptive Segment Routing problem. The
+three JSON input files are converted into a period-specific network model, the shortest-path splitting
+coefficients are computed, and the resulting routing problem is solved as a mixed-integer linear
+program. A compact formulation is used for small instances, while a path-based formulation with column
+generation makes the larger instances tractable. Every reported routing is checked independently
+before its MLU is accepted.
+
+The method was tested on all twenty Set~A instances using the time limits specified by the course
+project. For period~0, twelve instances were certified MLU-optimal in all ten runs. For the joint
+two-period problem, thirteen instances were certified in all ten runs, while setA-03 was certified in
+eight of ten runs. Feasible solutions were found for every instance. The remaining large optimality
+gaps, particularly on setA-16 and setA-19, highlight the need for stronger lower bounds and improved
+feasible solutions in the current two-period approach.
+
+The reported certificates apply to the scalar maximum-link-utilization objective~\eqref{eq:mlu}, which
+is only the first level of the challenge's lexicographic objective. Future work could focus on
+improving lower-bound quality, refining the pricing strategy, and strengthening the integer search
+through branch-and-price techniques. Once the minimum MLU has been certified, the model could then
+optimize the remaining load levels in lexicographic order.

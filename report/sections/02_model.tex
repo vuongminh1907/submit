@@ -1,0 +1,166 @@
+\section{Mathematical model}
+\label{sec:model}
+
+\subsection{Data}
+\label{sec:data}
+
+Let $V$ be the set of routers and $A$ the set of directed links in the nominal network. Every link
+$a=(u,v)\in A$ has a strictly positive administrative metric $\omega_a$ and a capacity $c_a>0$. Let
+$D$ be the set of traffic demands. A demand $d\in D$ is specified by its source $s_d\in V$,
+destination $\tau_d\in V$, and nonnegative volume $v_{dt}$ in period~$t$. The experiments use either
+$T=\{0\}$ or $T=\{0,1\}$. For each period, $q_t\subseteq A$ denotes the links removed by the
+intervention and
+\[
+A_t=A\setminus q_t,\qquad G_t=(V,A_t).
+\]
+In the supplied instances $q_0=\emptyset$. The scenario also provides the maximum number of segments
+$M=\mathrm{maxSeg}=6$ and, for the transition from period~0 to period~1, a reconfiguration
+budget~$\kappa$.
+
+These parameters are read from the three files required by the project specification: the network
+file supplies $(V,A,\omega,c)$, the traffic-matrix file supplies $(D,s,\tau,v)$, and the scenario
+file supplies $(q,M,\kappa)$. The JSON representation is therefore only the input format; the
+optimization model below is defined in terms of the mathematical sets and parameters above. Node and
+link identifiers are mapped explicitly rather than assumed to be consecutive.
+
+Only a reachable ordered pair $(i,j)$ with $i\neq j$ can be used as a segment in period~$t$; let
+$S_t$ denote the set of all such pairs. Between the endpoints of a segment, traffic is forwarded on
+shortest paths in $G_t$. Let $\ell^t_{ij}$ be the shortest-path distance from $i$ to $j$ and let
+$\sigma^t_{ij}$ be the number of shortest directed paths. For an available link $a=(u,v)\in A_t$, the
+split coefficient $r^t_{ija}$ is the fraction of the traffic of segment $(i,j)$ carried by~$a$. The
+course note~\citep{courser2026} gives
+\begin{equation}
+r^t_{ija}=
+\begin{cases}
+\dfrac{\sigma^t_{iu}\,\sigma^t_{vj}}{\sigma^t_{ij}}, & \text{if } \ell^t_{iu}+\omega_a+\ell^t_{vj}=\ell^t_{ij},\\[0.6em]
+0, & \text{otherwise.}
+\end{cases}
+\label{eq:r}
+\end{equation}
+All distances and path counts, and hence all $r^t_{ija}$, are recomputed after an intervention
+because deleting a link can change both reachability and the shortest-path DAG. The implementation
+runs Dijkstra's algorithm from every router and stores path counts in logarithmic form to avoid
+numerical overflow.
+
+Equation~\eqref{eq:r} assigns equal probability to complete shortest paths and is used throughout the
+experiments. It is not identical to a router-local ECMP recursion, which can assign different
+probabilities to complete shortest paths on an asymmetric DAG. Consequently, the numerical loads in
+this report are internally consistent with the supplied course note but may differ from an evaluator
+that applies router-local ECMP.
+
+\subsection{Decision variables}
+
+For every $d\in D$, $t\in T$, and $(i,j)\in S_t$, define
+\[
+x^{dt}_{ij}=
+\begin{cases}
+1, & \text{if the segment path of demand } d \text{ contains segment } (i,j) \text{ in period } t,\\
+0, & \text{otherwise.}
+\end{cases}
+\]
+Thus, the nonzero $x$ variables describe the ordered waypoint sequence selected for each demand and
+period; the physical links used between two consecutive waypoints are induced by the split
+coefficients rather than selected directly.
+
+The continuous variable $L\ge 0$ is an upper bound on every available-link utilization in every
+modeled period. No separate load variable is required because each load is a linear expression
+in~$x$. For the two-period model, an auxiliary continuous variable $y^d_{ij}\ge 0$ represents the
+absolute change of segment $(i,j)$ for demand~$d$ between periods.
+
+\subsection{Objective}
+\label{sec:objective}
+
+For a link $a\in A_t$, define its carried flow and utilization as
+\begin{equation}
+F_{at}=\sum_{d\in D}\sum_{(i,j)\in S_t} r^t_{ija}\,v_{dt}\,x^{dt}_{ij},
+\qquad
+\lambda_{at}=\frac{F_{at}}{c_a}.
+\label{eq:load-def}
+\end{equation}
+The implemented objective is the scalar maximum link utilization (MLU):
+\begin{equation}
+\min L,\qquad L=\max_{t\in T,\,a\in A_t}\lambda_{at}.
+\label{eq:mlu}
+\end{equation}
+This classical intra-domain traffic-engineering criterion suppresses bottlenecks, distributes traffic
+over the available capacity, and preserves residual capacity for growth, bursts, and
+failures~\citep{fortz2002te,texcp2005}. Because queuing delay rises nonlinearly as utilization
+approaches capacity, controlling the peak is more protective of worst-case performance than minimizing
+average load alone~\citep{fortz2002te}.
+
+The challenge objective~\citep{orange2026} is stronger: after minimizing the largest element of the
+load vector, it minimizes the second largest, then the third largest, and so on. Objective
+\eqref{eq:mlu} is exactly the first stage of that lexicographic objective, but it does not break ties
+between solutions having the same MLU. Accordingly, every lower bound, gap, and ``MLU-optimal'' label
+in this report refers only to the scalar problem~\eqref{eq:mlu}.
+
+\subsection{Constraints}
+
+\paragraph{Flow conservation.}
+For each demand and period, the selected segments must form a unit flow from its source to its
+destination:
+\begin{equation}
+\sum_{j:(i,j)\in S_t} x^{dt}_{ij}-\sum_{j:(j,i)\in S_t} x^{dt}_{ji}=
+\begin{cases}
+1, & i=s_d,\\
+-1, & i=\tau_d,\\
+0, & \text{otherwise,}
+\end{cases}
+\qquad \forall d\in D,\ t\in T,\ i\in V.
+\label{eq:flow}
+\end{equation}
+The formulation also adds the valid degree inequalities
+\begin{equation}
+\sum_{j:(i,j)\in S_t} x^{dt}_{ij}\le \mathbf{1}\{i\neq\tau_d\},
+\qquad
+\sum_{j:(j,i)\in S_t} x^{dt}_{ji}\le \mathbf{1}\{i\neq s_d\},
+\qquad \forall d,t,i.
+\label{eq:degree}
+\end{equation}
+They forbid branching, forbid a segment entering the source or leaving the destination, and make the
+source--destination component a simple path. A disconnected directed cycle is still formally
+possible, but deleting it preserves conservation and cannot increase $L$, since every traffic
+coefficient is nonnegative.
+
+\paragraph{Segment limit.}
+The complete segment path, including its first and last segments, is limited by
+\begin{equation}
+\sum_{(i,j)\in S_t} x^{dt}_{ij}\le M,\qquad \forall d\in D,\ t\in T.
+\label{eq:segments}
+\end{equation}
+This is the bound on the segment list carried by the packet, not a bound on the number of physical
+links traversed inside the shortest-path forwarding graphs.
+
+\paragraph{Link utilization.}
+Substituting~\eqref{eq:load-def} into $\lambda_{at}\le L$ gives the linear constraints
+\begin{equation}
+\sum_{d\in D}\sum_{(i,j)\in S_t} r^t_{ija}\,v_{dt}\,x^{dt}_{ij}\le c_a L,
+\qquad \forall t\in T,\ a\in A_t.
+\label{eq:utilization}
+\end{equation}
+The left-hand side sums the fractions of all selected segments that traverse link~$a$. Dividing by
+$c_a$ shows directly that~\eqref{eq:utilization} bounds every link utilization by $L$; because $L$ is
+minimized, at least one such inequality is tight at an optimum. Loads above one remain allowed and
+indicate congestion.
+
+\paragraph{Reconfiguration budget.}
+Let $S=S_0\cup S_1$ and define $\bar x^{dt}_{ij}=x^{dt}_{ij}$ when $(i,j)\in S_t$, and
+$\bar x^{dt}_{ij}=0$ otherwise. For each demand and possible segment, the absolute difference is
+linearized as
+\begin{equation}
+y^d_{ij}\ge \bar x^{d,1}_{ij}-\bar x^{d,0}_{ij},
+\qquad
+y^d_{ij}\ge \bar x^{d,0}_{ij}-\bar x^{d,1}_{ij},
+\qquad \forall d\in D,\ (i,j)\in S.
+\label{eq:change}
+\end{equation}
+The total number of segment-usage changes is bounded by
+\begin{equation}
+\sum_{d\in D}\sum_{(i,j)\in S} y^d_{ij}\le\kappa.
+\label{eq:budget}
+\end{equation}
+The two inequalities force $y^d_{ij}\ge\lvert\bar x^{d,1}_{ij}-\bar x^{d,0}_{ij}\rvert$; any
+unnecessary excess only consumes budget and can be reduced without affecting another constraint.
+Hence~\eqref{eq:budget} bounds the symmetric difference between the two segment sets exactly as
+required by the project definition. It is omitted in the period-0 experiment and activated only in the
+joint two-period model.
