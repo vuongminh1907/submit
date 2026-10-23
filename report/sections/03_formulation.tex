@@ -1,0 +1,69 @@
+\section{Scalar MLU formulation}
+\label{sec:obj}
+
+\subsection{Objective and scientific rationale}
+
+Let $\lambda(a,t)$ be the load of arc~$a$ at period~$t$, that is, the ratio of carried flow
+to capacity.
+The implemented objective is
+\begin{equation}
+\min\; L
+\qquad\text{with}\qquad
+L=\max_{t\in T,\,a\in A(t)}\lambda(a,t).
+\label{eq:mlu}
+\end{equation}
+Minimizing maximum utilization is a classical intra-domain traffic-engineering objective:
+it pushes traffic away from bottlenecks, balances load across the topology and maximizes
+residual capacity for growth, bursts and failures~\citep{fortz2002te,texcp2005}.
+Queuing delay grows nonlinearly with utilization, so reducing the peak load improves the
+worst-case delay bound more directly than reducing the average load alone~\citep{fortz2002te}.
+
+The challenge objective~\citep{orange2026} extends~\eqref{eq:mlu} by continuing, after the
+peak is fixed, to the second-largest load, then the third, and so on.
+Equation~\eqref{eq:mlu} therefore determines the first component of that lexicographic order,
+but does not optimize the remaining components.
+All lower bounds, gaps and ``MLU-optimal'' labels below refer exclusively to~\eqref{eq:mlu}.
+
+\subsection{Variables and constraints}
+
+The binary variable $x_{dtij}$ equals one when demand~$d$ uses the segment from $i$ to $j$
+in period~$t$.
+On each period graph the model is
+\begin{align}
+\sum_{j\neq i} x_{dtij}-\sum_{j\neq i} x_{dtji}
+  &=
+  \begin{cases}
+  1, & i=s(d),\\
+  -1, & i=t(d),\\
+  0, & \text{otherwise,}
+  \end{cases}
+  && \forall\, d,i, \label{eq:flow}\\[0.25em]
+\sum_{i\neq j} x_{dtij} &\le \mathrm{maxSeg},
+  && \forall\, d, \label{eq:seg}\\[0.2em]
+\sum_{d\in D}\sum_{i\neq j} r_{ijat}\, v_{dt}\, x_{dtij} &\le c_a L,
+  && \forall\, a\in A(t). \label{eq:load}
+\end{align}
+Flow conservation on the segment graph produces an $s$--$t$ chain.
+Degree inequalities (at most one selected segment leaving or entering a vertex, none leaving
+the target or entering the source) are added as valid cuts so that the source--target component
+is a simple path.
+A detached directed cycle remains formally possible; deleting it never increases~$L$, because
+every segment contribution is nonnegative.
+Constraint~\eqref{eq:seg} limits the header length; constraint~\eqref{eq:load} links ECMP load
+to~$L$.
+
+For the two-period model, \eqref{eq:flow}--\eqref{eq:load} are written at $t=0$ and $t=1$.
+The period-1 graph deletes the intervention links, and both~\eqref{eq:r} and the volumes are
+recomputed.
+The symmetric difference of the two segment sets is linearized by $y_{dij}\ge 0$:
+\begin{equation}
+\begin{aligned}
+y_{dij}&\ge x_{d,1,ij}-x_{d,0,ij},&
+y_{dij}&\ge x_{d,0,ij}-x_{d,1,ij},\\
+\sum_{d,i,j} y_{dij}&\le \kappa.
+\end{aligned}
+\label{eq:budget}
+\end{equation}
+The direct routing $(s(d),t(d))$ in both periods has distance zero whenever both endpoints
+remain reachable, so a feasible budget-compliant solution always exists on the tested Set~A
+instances.

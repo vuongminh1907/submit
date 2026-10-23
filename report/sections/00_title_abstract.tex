@@ -1,0 +1,23 @@
+\begin{center}
+{\LARGE\bfseries\color{ink} T-Adaptive Segment Routing}\\[0.4em]
+{\color{ink}\rule{3.2cm}{0.7pt}}\\[0.45em]
+{\large\color{ink} A scalar maximum-link-utilization model on Set~A}\\[0.3em]
+{\small\color{muted}
+Vuong Minh \enspace\textbar\enspace October 2026 \enspace\textbar\enspace
+Orange / EURO-ROADEF 2026}
+\end{center}
+
+\begin{abstract}
+\noindent
+\small
+This report studies the course Orange project derived from the EURO/ROADEF 2026
+$T$-Adaptive Segment Routing challenge~\citep{orange2026}.
+We implement and solve the scalar problem
+$\min L=\max_{t,a}\lambda(a,t)$, that is, the minimization of maximum link utilization (MLU).
+MLU is the first component of the challenge's lexicographic objective and a standard
+traffic-engineering criterion used to suppress hot spots and preserve residual capacity.
+All Set~A instances are solved for period~0 (1800\,s) and for periods~0 and~1 with the
+reconfiguration budget (3600\,s), with averages over ten seeded runs.
+Bounds, gaps and the label ``MLU-optimal'' refer only to this scalar problem,
+not to full lexicographic optimality.
+\end{abstract}

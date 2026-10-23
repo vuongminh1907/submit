@@ -1,0 +1,25 @@
+\section{Solution method}
+
+The model is written in Julia with JuMP~1.32.1~\citep{jump2017} and HiGHS~1.26.0, using one
+solver thread.
+The recorded time is the elapsed wall-clock time spent inside \texttt{optimize!}, summed over
+the solver calls of a run; graph construction and coefficient generation lie outside that timer.
+
+If $|D|\,|T|\,|V|\,(|V|-1)\le 100\,000$, JuMP builds the compact MIP and HiGHS solves it
+directly (setA-01--03 in both experiments).
+Larger instances use column generation: each column is a segment path for one demand, the
+restricted master minimizes~$L$, and pricing seeks a path of at most $\mathrm{maxSeg}$ hops
+with negative reduced cost.
+When the ordinary shortest-path weight is already nonnegative, no hop-limited path has negative
+reduced cost, so the corrected master bound is valid for the linear relaxation.
+Generated columns are then made binary and HiGHS applies branch-and-bound in the remaining time.
+
+For two periods, each period is priced separately.
+Because the budget only removes solutions, a certified single-period MLU bound remains a lower
+bound on the joint maximum.
+A candidate is accepted only after an independent check of terminals, segment limit, reachability,
+repeated vertices, budget and recomputed maximum load.
+A run is labelled MLU-optimal when the checked value meets the bound; otherwise it is not
+certified.
+The gap is $1-\mathrm{LB}/\mathrm{UB}$, and a zero gap is written only when the bound certifies
+the incumbent for~\eqref{eq:mlu}.

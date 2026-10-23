@@ -1,0 +1,34 @@
+\section{Data and assumptions}
+\label{sec:data}
+
+Each Set~A instance is given by three JSON files.
+The network file provides vertices, directed links, administrative metrics $\omega_a$ and
+capacities $c_a$.
+The traffic file provides, for every demand~$d$, a source $s(d)$, a target $t(d)$ and a
+volume $v_{dt}$ in each time slot.
+The scenario file gives $\mathrm{maxSeg}=6$, the period-1 budget $\kappa$ and the links
+removed at period~1.
+Period~0 has no intervention and no budget.
+Identifiers are stored as given; they are not assumed to form an interval, and no Set~A
+instance contains two links with the same ordered pair of endpoints.
+
+For a period~$t$, let $G(t)=(V,A(t))$ be the directed graph of available links.
+Dijkstra's algorithm from every vertex returns the distance $d_{ij}(t)$ and the number
+$\sigma_{ij}(t)$ of shortest directed $i$--$j$ paths (path counts are stored in logarithmic
+form).
+For an arc $a=(u,v)$, the course note~\citep{courser2026} defines the fraction of those
+paths that use~$a$:
+\begin{equation}
+r_{ijat}=
+\begin{cases}
+\dfrac{\sigma_{iu}(t)\,\sigma_{vj}(t)}{\sigma_{ij}(t)},
+  & \text{if } d_{iu}(t)+\omega_a+d_{vj}(t)=d_{ij}(t),\\[0.35em]
+0, & \text{otherwise.}
+\end{cases}
+\label{eq:r}
+\end{equation}
+This uniform-over-path formula is the one used throughout the experiments.
+It is not identical to a router-local ECMP recursion, which can assign different probabilities
+to complete shortest paths on an asymmetric DAG; loads are therefore comparable within this
+report, not necessarily to an official challenge evaluator that uses the other rule.
+If $j$ is unreachable from $i$, the segment $(i,j)$ is omitted.
